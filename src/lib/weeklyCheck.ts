@@ -121,23 +121,33 @@ interface WeeklyCtx {
 // Locally, cuts run in-process.
 const DISPATCH_STAGGER_MS = 1500;
 
+/** The app's public address. Per-deployment URLs can sit behind Vercel's login, so prefer the main one. */
+function appOrigin(): string | null {
+  if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, "");
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+  return null;
+}
+
 async function priceCutRemotely(w: WatchItem, trace: Trace): Promise<PriceResult[]> {
-  const res = await fetch(`https://${process.env.VERCEL_URL}/api/price-cut`, {
+  const res = await fetch(`${appOrigin()}/api/price-cut`, {
     method: "POST",
     headers: { Authorization: `Bearer ${requireEnv("CRON_SECRET")}`, "Content-Type": "application/json" },
     body: JSON.stringify({ watchItemId: w.id }),
     signal: AbortSignal.timeout(295_000),
   });
-  const body = (await res.json().catch(() => ({}))) as { results?: PriceResult[]; trace?: Trace["events"]; error?: string };
+  const body = (await res.json().catch(() => ({}))) as { results?: PriceResult[]; trace?: Trace["events"]; error?: unknown };
   trace.events.push(...(body.trace ?? []));
-  if (!res.ok || !body.results) throw new Error(body.error ?? `price-cut failed (${res.status})`);
+  if (!res.ok || !body.results) {
+    const detail = typeof body.error === "string" ? body.error : JSON.stringify(body.error ?? null);
+    throw new Error(`price-cut failed (${res.status}): ${detail}`);
+  }
   return body.results;
 }
 
 async function checkItems(ctx: WeeklyCtx, items: WatchItem[]) {
   const todo = items.filter((w) => !ctx.results.has(w.id));
   for (const w of todo) ctx.results.set(w.id, []); // claim them so parallel dispatches don't double up
-  const remote = Boolean(process.env.VERCEL_URL);
+  const remote = Boolean(process.env.VERCEL) && appOrigin() !== null;
   const priceOne = async (w: WatchItem, i: number) => {
     try {
       let res: PriceResult[];
