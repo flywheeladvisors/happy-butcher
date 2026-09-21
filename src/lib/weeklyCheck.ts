@@ -8,6 +8,7 @@ import { HAPPY_BUTCHER_SYSTEM } from "./persona";
 import { getItemPrices } from "./prices";
 import { listStores, listWatchItems, saveAgentRun } from "./queries";
 import type { PriceResult, WatchItem } from "./types";
+import { lowestEveryday, type EverydayBest } from "./everyday";
 
 // The Wednesday check, run by the agent team:
 //   Happy Butcher reviews the watch list and dispatches Deal Hunters (each paired with the Cut
@@ -46,7 +47,7 @@ function priceLine(d: Deal): string {
   return d.promo_text ?? "On sale";
 }
 
-export function renderEmail(deals: Deal[], words: { intro: string; signoff: string }, appUrl: string | null) {
+export function renderEmail(deals: Deal[], everyday: EverydayBest[], words: { intro: string; signoff: string }, appUrl: string | null) {
   const byItem = new Map<string, Deal[]>();
   for (const d of deals) byItem.set(d.item, [...(byItem.get(d.item) ?? []), d]);
 
@@ -58,6 +59,9 @@ export function renderEmail(deals: Deal[], words: { intro: string; signoff: stri
       ...ds.map((d) => `  ${d.store}: ${d.product_name ?? item} — ${priceLine(d)}${d.unit_price ? ` [${d.unit_price}]` : ""}${d.promo_text ? ` — ${d.promo_text}` : ""}${d.product_url ? `\n    ${d.product_url}` : ""}`),
       "",
     ]),
+    ...(everyday.length
+      ? ["LOWEST EVERYDAY PRICES (per lb, not on sale)", ...everyday.map((e) => `  ${e.item}: ${e.store} ${e.per_lb.toFixed(2)}/lb, ${e.product_name ?? ""}${e.compared > 1 ? ` (cheapest of ${e.compared} stores)` : ""}`), ""]
+      : []),
     words.signoff,
     appUrl ? `\nAsk the butcher: ${appUrl}` : "",
   ].join("\n");
@@ -81,15 +85,25 @@ export function renderEmail(deals: Deal[], words: { intro: string; signoff: stri
     )
     .join("");
 
+  const everydayRows = everyday
+    .map(
+      (e) => `<tr>
+        <td style="padding:8px 8px 8px 0;font-size:13px;font-weight:600;vertical-align:top;border-bottom:1px solid #f0f0f0">${esc(e.item)}</td>
+        <td style="padding:8px;font-size:13px;vertical-align:top;border-bottom:1px solid #f0f0f0">${esc(e.store)}<div style="color:#737373;font-size:12px">${e.product_url ? `<a href="${esc(e.product_url)}" style="color:#737373">${esc(e.product_name ?? "")}</a>` : esc(e.product_name ?? "")}</div></td>
+        <td style="padding:8px 0 8px 8px;font-size:13px;text-align:right;white-space:nowrap;vertical-align:top;border-bottom:1px solid #f0f0f0"><strong>${e.per_lb.toFixed(2)}/lb</strong>${e.compared > 1 ? `<div style="color:#a3a3a3;font-size:11px">best of ${e.compared}</div>` : ""}</td></tr>`,
+    )
+    .join("");
+
   const html = `<div style="background:#efefef;padding:24px 12px;font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#171717">
   <div style="max-width:600px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:14px;padding:24px">
     <div style="font-size:13px;font-weight:600"><span style="display:inline-block;background:#171717;color:#fff;border-radius:5px;padding:2px 5px;font-size:10px;margin-right:6px">HB</span>The Happy Butcher</div>
-    <h1 style="font-size:20px;margin:18px 0 8px">This week's deals on your cuts</h1>
+    <h1 style="font-size:20px;margin:18px 0 8px">This week's best prices on your cuts</h1>
     <p style="font-size:14px;line-height:1.5;color:#404040;margin:0 0 8px">${esc(words.intro)}</p>
-    <table style="width:100%;border-collapse:collapse">${rows}</table>
+    ${rows ? `<h2 style="font-size:15px;margin:18px 0 0">On sale this week</h2><table style="width:100%;border-collapse:collapse">${rows}</table>` : ""}
+    ${everydayRows ? `<h2 style="font-size:15px;margin:24px 0 4px">Lowest everyday prices</h2><p style="font-size:12px;color:#737373;margin:0 0 4px">Cheapest regular (non-sale) price per lb across your stores.</p><table style="width:100%;border-collapse:collapse">${everydayRows}</table>` : ""}
     <p style="font-size:14px;color:#404040;margin:20px 0 0">${esc(words.signoff)}</p>
     ${appUrl ? `<p style="margin:18px 0 0"><a href="${esc(appUrl)}" style="display:inline-block;background:#171717;color:#fff;text-decoration:none;border-radius:8px;padding:8px 14px;font-size:13px">Ask the butcher</a></p>` : ""}
-    <p style="font-size:11px;color:#a3a3a3;margin:20px 0 0">Prices from this week's weekly ads for your Cary stores. "Approx." regular prices come from "save up to" wording in the ad.</p>
+    <p style="font-size:11px;color:#a3a3a3;margin:20px 0 0">Prices from this week's weekly ads and store catalogs for your Cary stores. "Approx." regular prices come from "save up to" wording in the ad.</p>
   </div></div>`;
 
   return { text, html };
@@ -119,7 +133,7 @@ const weeklyTools: AgentTool<WeeklyCtx>[] = [
   {
     name: "dispatch_deal_hunters",
     description:
-      "Send Deal Hunters (each checked by the Cut Inspector) to price these watch-list cuts at every store, in parallel. Returns each cut's verified sale deals.",
+      "Send Deal Hunters (each checked by the Cut Inspector) to price these watch-list cuts at every store, in parallel. Returns each cut's verified sale deals and its lowest everyday per-lb price.",
     parameters: {
       type: "object",
       properties: { cuts: { type: "array", items: { type: "string" }, description: "Watch-list cut names, exactly as listed" } },
@@ -130,12 +144,17 @@ const weeklyTools: AgentTool<WeeklyCtx>[] = [
       const names = (args.cuts as string[]).map((n) => n.toLowerCase());
       const chosen = ctx.items.filter((w) => names.includes(w.name.toLowerCase()));
       await checkItems(ctx, chosen);
-      return chosen.map((w) => ({
-        cut: w.name,
-        deals: (ctx.results.get(w.id) ?? [])
-          .filter((r) => r.status === "found" && r.on_sale)
-          .map((d) => ({ store: d.store, product: d.product_name, price: priceLine(d), promo: d.promo_text })),
-      }));
+      return chosen.map((w) => {
+        const results = ctx.results.get(w.id) ?? [];
+        const best = lowestEveryday(results)[0];
+        return {
+          cut: w.name,
+          deals: results
+            .filter((r) => r.status === "found" && r.on_sale)
+            .map((d) => ({ store: d.store, product: d.product_name, price: priceLine(d), promo: d.promo_text })),
+          lowest_everyday: best ? { store: best.store, product: best.product_name, per_lb: best.per_lb } : null,
+        };
+      });
     },
   },
 ];
@@ -144,8 +163,8 @@ const WEEKLY_SYSTEM = `${HAPPY_BUTCHER_SYSTEM}
 
 It's Wednesday morning and the new weekly ads just dropped. Your routine:
 1. Dispatch Deal Hunters for every cut on the watch list (you can send them all at once).
-2. Read the verified deals that come back.
-3. Submit the rundown: an intro (2-3 sentences in your voice, calling out the best one or two deals by cut and store) and a one-line sign-off. Do NOT write prices or numbers; the deals table is added to the email for you.`;
+2. Read what comes back: verified sales, plus each cut's lowest everyday price.
+3. Submit the rundown: an intro (2-3 sentences in your voice, calling out the best one or two deals by cut and store, and a standout everyday price if there is one) and a one-line sign-off. Do NOT write prices or numbers; the deals table is added to the email for you.`;
 
 export interface WeeklyReport {
   items: number;
@@ -157,6 +176,7 @@ export interface WeeklyReport {
   email_error: string | null;
   run_id: number | null;
   deal_list: { item: string; store: string; product: string | null; price: string }[];
+  lowest_everyday: EverydayBest[];
 }
 
 export async function runWeeklyCheck(options: { sendEmail?: boolean } = {}): Promise<WeeklyReport> {
@@ -200,7 +220,8 @@ export async function runWeeklyCheck(options: { sendEmail?: boolean } = {}): Pro
 
   const all = [...ctx.results.values()].flat();
   const deals = all.filter((r) => r.status === "found" && r.on_sale);
-  if (!words.intro && deals.length) {
+  const everyday = lowestEveryday(all);
+  if (!words.intro && (deals.length || everyday.length)) {
     words.intro = `Mornin', neighbor! The new ads just dropped and I found ${deals.length} deal${deals.length === 1 ? "" : "s"} on your cuts.`;
   }
 
@@ -214,20 +235,22 @@ export async function runWeeklyCheck(options: { sendEmail?: boolean } = {}): Pro
     email_error: null,
     run_id: null,
     deal_list: deals.map((d) => ({ item: d.item, store: d.store, product: d.product_name, price: priceLine(d) })),
+    lowest_everyday: everyday,
   };
 
-  // Sale-only by design: no deals, no email.
-  if (deals.length === 0 || options.sendEmail === false) {
+  // Sales plus lowest everyday prices; nothing to report means no email.
+  const hasNews = deals.length > 0 || everyday.length > 0;
+  if (!hasNews || options.sendEmail === false) {
     await run(sql`insert into public.notifications (summary_text, delivered, error)
-      values (${deals.length ? "Email skipped (dry run)" : "No deals this week; no email sent"}, false, null)`);
+      values (${hasNews ? "Email skipped (dry run)" : "Nothing to report this week; no email sent"}, false, null)`);
   } else {
-    const { text, html } = renderEmail(deals, words, process.env.APP_URL || null);
+    const { text, html } = renderEmail(deals, everyday, words, process.env.APP_URL || null);
     try {
       const resend = new Resend(requireEnv("RESEND_API_KEY"));
       const { error } = await resend.emails.send({
         from: requireEnv("RESEND_FROM_EMAIL"),
         to: requireEnv("HOUSEHOLD_EMAIL"),
-        subject: `🥩 ${deals.length} meat deal${deals.length === 1 ? "" : "s"} this week`,
+        subject: `🥩 ${deals.length} meat deal${deals.length === 1 ? "" : "s"} + lowest everyday prices this week`,
         text,
         html,
       });
@@ -239,7 +262,7 @@ export async function runWeeklyCheck(options: { sendEmail?: boolean } = {}): Pro
     await run(sql`insert into public.notifications (summary_text, delivered, error) values (${text}, ${report.emailed}, ${report.email_error})`);
   }
 
-  const outcome = report.emailed ? "sent" : options.sendEmail === false ? "skipped (dry run)" : deals.length ? "failed" : "not needed";
+  const outcome = report.emailed ? "sent" : options.sendEmail === false ? "skipped (dry run)" : hasNews ? "failed" : "not needed";
   trace.add("Happy Butcher", "submit", `${deals.length} deals; email ${outcome}`);
   report.run_id = await saveAgentRun("weekly", `${deals.length} deals from ${all.length} checks`, trace.events).catch(() => null);
   return report;
