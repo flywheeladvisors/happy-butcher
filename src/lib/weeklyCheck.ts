@@ -116,17 +116,44 @@ interface WeeklyCtx {
   results: Map<number, Deal[]>;
 }
 
+// On Vercel, each cut's Deal Hunter runs in its own function invocation (/api/price-cut), so every
+// cut gets its own time budget; dispatches are staggered so store sites aren't hit all at once.
+// Locally, cuts run in-process.
+const DISPATCH_STAGGER_MS = 1500;
+
+async function priceCutRemotely(w: WatchItem, trace: Trace): Promise<PriceResult[]> {
+  const res = await fetch(`https://${process.env.VERCEL_URL}/api/price-cut`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${requireEnv("CRON_SECRET")}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ watchItemId: w.id }),
+    signal: AbortSignal.timeout(295_000),
+  });
+  const body = (await res.json().catch(() => ({}))) as { results?: PriceResult[]; trace?: Trace["events"]; error?: string };
+  trace.events.push(...(body.trace ?? []));
+  if (!res.ok || !body.results) throw new Error(body.error ?? `price-cut failed (${res.status})`);
+  return body.results;
+}
+
 async function checkItems(ctx: WeeklyCtx, items: WatchItem[]) {
   const todo = items.filter((w) => !ctx.results.has(w.id));
   for (const w of todo) ctx.results.set(w.id, []); // claim them so parallel dispatches don't double up
-  await mapLimit(todo, CONCURRENCY, async (w) => {
+  const remote = Boolean(process.env.VERCEL_URL);
+  const priceOne = async (w: WatchItem, i: number) => {
     try {
-      const res = await getItemPrices(w.name, { source: "weekly", watchItemId: w.id, trace: ctx.trace });
+      let res: PriceResult[];
+      if (remote) {
+        await new Promise((r) => setTimeout(r, i * DISPATCH_STAGGER_MS));
+        res = await priceCutRemotely(w, ctx.trace);
+      } else {
+        res = await getItemPrices(w.name, { source: "weekly", watchItemId: w.id, trace: ctx.trace });
+      }
       ctx.results.set(w.id, res.map((r) => ({ ...r, item: w.name })));
     } catch (err) {
       ctx.trace.add("Deal Hunter", "error", `${w.name}: ${err instanceof Error ? err.message : err}`);
     }
-  });
+  };
+  if (remote) await Promise.all(todo.map(priceOne));
+  else await mapLimit(todo.map((w, i) => [w, i] as const), CONCURRENCY, ([w, i]) => priceOne(w, i));
 }
 
 const weeklyTools: AgentTool<WeeklyCtx>[] = [
