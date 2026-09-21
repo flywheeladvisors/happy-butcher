@@ -80,6 +80,8 @@ Verdicts:
 - reject: wrong cut or misread. If the Hunter could plausibly find the right item (e.g. it picked the marinated one but the plain one might be in the ad), give a concrete retry_hint; otherwise retry_hint null.
 Stores with no evidence: reject with retry_hint null and reason "nothing found".
 
+Work in parallel: request all the evidence and price parses you need in one turn, then decide. Aim to finish in 2-3 turns.
+
 Finish with submit_verdicts: exactly one per store.`;
 
 const VerdictSchema = z.object({
@@ -97,7 +99,9 @@ function inspectorSpec(storeIds: number[]): AgentSpec<InspectorCtx, Verdict[]> {
     system: SYSTEM,
     tools,
     model: agentModel("inspector"),
-    maxRounds: 6,
+    maxRounds: 10,
+    // Seven stores' verdicts with reasons need room; a truncated submission arrives empty.
+    maxTokens: 6000,
     submit: {
       name: "submit_verdicts",
       description: "Your verdict on each store's finding.",
@@ -113,8 +117,8 @@ function inspectorSpec(storeIds: number[]): AgentSpec<InspectorCtx, Verdict[]> {
                 verdict: { type: "string", enum: ["approve", "reject", "unverified"] },
                 sale_from_history: { type: "boolean" },
                 typical_regular_price: { type: ["number", "null"] },
-                reason: { type: "string" },
-                retry_hint: { type: ["string", "null"] },
+                reason: { type: "string", description: "One short sentence" },
+                retry_hint: { type: ["string", "null"], description: "One short sentence, or null" },
               },
               required: ["store_id", "verdict", "reason"],
             },

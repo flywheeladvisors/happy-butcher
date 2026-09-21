@@ -71,3 +71,6 @@ create table if not exists public.agent_runs (
   events     jsonb not null,
   created_at timestamptz not null default now()
 );
+
+-- Which Wednesday run a check belongs to (the run is split into start / per-cut / finish calls).
+alter table public.price_checks add column if not exists run_id bigint references public.agent_runs (id) on delete set null;

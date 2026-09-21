@@ -19,7 +19,7 @@ const MAX_ROUNDS = 2;
 
 export async function getItemPrices(
   item: string,
-  meta: { source: "chat" | "weekly"; watchItemId?: number | null; trace: Trace },
+  meta: { source: "chat" | "weekly"; watchItemId?: number | null; trace: Trace; runId?: number | null },
 ): Promise<PriceResult[]> {
   const stores = await listStores();
   if (stores.length === 0) return [];
@@ -39,7 +39,21 @@ export async function getItemPrices(
     for (const f of found) findings.set(f.store_id, f);
 
     trace.add("Deal Hunter", "handoff", `handed ${found.filter((f) => f.evidence_id).length} candidates to the Cut Inspector`);
-    const judged = await runCutInspector({ stores: pending, locker, item }, found, trace);
+    let judged: Verdict[];
+    try {
+      judged = await runCutInspector({ stores: pending, locker, item }, found, trace);
+    } catch (err) {
+      // No verdict means nothing gets marked verified: the Hunter's findings come back "unverified".
+      trace.add("Cut Inspector", "error", `couldn't finish reviewing: ${err instanceof Error ? err.message : err}`);
+      judged = found.map((f) => ({
+        store_id: f.store_id,
+        verdict: f.evidence_id ? "unverified" : "reject",
+        sale_from_history: false,
+        typical_regular_price: null,
+        reason: f.evidence_id ? "Not reviewed: the Cut Inspector couldn't finish this check" : "nothing found",
+        retry_hint: null,
+      }));
+    }
     for (const v of judged) verdicts.set(v.store_id, v);
 
     feedback = judged.filter((v) => v.verdict === "reject" && v.retry_hint).map((v) => ({ store_id: v.store_id, hint: v.retry_hint! }));
@@ -47,7 +61,7 @@ export async function getItemPrices(
   }
 
   const results = stores.map((store) => buildResult(store, findings.get(store.id), verdicts.get(store.id), locker));
-  await savePriceChecks(results, { itemQuery: item, watchItemId: meta.watchItemId ?? null, source: meta.source });
+  await savePriceChecks(results, { itemQuery: item, watchItemId: meta.watchItemId ?? null, source: meta.source, runId: meta.runId });
   return results;
 }
 

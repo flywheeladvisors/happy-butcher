@@ -6,21 +6,18 @@ import { run, sql } from "./db";
 import { requireEnv } from "./env";
 import { HAPPY_BUTCHER_SYSTEM } from "./persona";
 import { getItemPrices } from "./prices";
-import { listStores, listWatchItems, saveAgentRun } from "./queries";
-import type { PriceResult, WatchItem } from "./types";
+import { appendAgentRun, createAgentRun, listStores, listWatchItems, runResults } from "./queries";
+import { getScrapedAd } from "./scrapedAds";
+import type { PriceResult, Store, WatchItem } from "./types";
 import { lowestEveryday, type EverydayBest } from "./everyday";
 
-// The Wednesday check, run by the agent team:
-//   Happy Butcher reviews the watch list and dispatches Deal Hunters (each paired with the Cut
-//   Inspector) for the cuts, reads what comes back, and writes the rundown.
-//   Code guarantees every watched cut gets checked, keeps only verified sales, and renders the
-//   prices into the email itself, so no model can misstate a number.
+// The Wednesday check: email rendering here; orchestration (start / hunt / finish) below.
+// Prices in the email come straight from saved results; the Butcher only writes the intro and
+// sign-off, so no model can misstate a number.
 
 export interface Deal extends PriceResult {
   item: string;
 }
-
-const CONCURRENCY = 8;
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -109,68 +106,35 @@ export function renderEmail(deals: Deal[], everyday: EverydayBest[], words: { in
   return { text, html };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Orchestration. The Wednesday run has three steps so no single function call has to fit every
+// cut into Vercel's time limit:
+//   start  - the Butcher reviews the watch list and dispatches a Deal Hunter per cut (the run id
+//            and cut list go back to the caller); store ad pages are scraped once, up front.
+//   hunt   - one /api/price-cut call per cut (Deal Hunter + Cut Inspector), results saved with
+//            the run id. GitHub Actions makes these calls, a few at a time.
+//   finish - the Butcher reads the run's verified results and writes the rundown; the email goes out.
+// runWeeklyCheck does all three in one process (local dev and dry runs).
 
-interface WeeklyCtx {
+type Words = { intro: string; signoff: string };
+
+const START_SYSTEM = `${HAPPY_BUTCHER_SYSTEM}
+
+It's Wednesday morning and the new weekly ads just dropped. Dispatch a Deal Hunter for every cut on the watch list (all at once is fine), then confirm the dispatch.`;
+
+const FINISH_SYSTEM = `${HAPPY_BUTCHER_SYSTEM}
+
+The Deal Hunters and the Cut Inspector are back with this week's verified results. Write the Wednesday email's intro (2-3 sentences in your voice, calling out the best one or two deals by cut and store, and a standout everyday price if there is one) and a one-line sign-off. Do NOT write prices or numbers; the tables are added to the email for you.`;
+
+interface DispatchCtx {
   items: WatchItem[];
-  trace: Trace;
-  results: Map<number, Deal[]>;
+  dispatched: Set<number>;
 }
 
-// On Vercel, each cut's Deal Hunter runs in its own function invocation (/api/price-cut), so every
-// cut gets its own time budget; dispatches are staggered so store sites aren't hit all at once.
-// Locally, cuts run in-process.
-const DISPATCH_STAGGER_MS = 1500;
-
-/** The app's public address. Per-deployment URLs can sit behind Vercel's login, so prefer the main one. */
-function appOrigin(): string | null {
-  if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, "");
-  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
-  return null;
-}
-
-async function priceCutRemotely(w: WatchItem, trace: Trace): Promise<PriceResult[]> {
-  const res = await fetch(`${appOrigin()}/api/price-cut`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${requireEnv("CRON_SECRET")}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ watchItemId: w.id }),
-    signal: AbortSignal.timeout(295_000),
-  });
-  const body = (await res.json().catch(() => ({}))) as { results?: PriceResult[]; trace?: Trace["events"]; error?: unknown };
-  trace.events.push(...(body.trace ?? []));
-  if (!res.ok || !body.results) {
-    const detail = typeof body.error === "string" ? body.error : JSON.stringify(body.error ?? null);
-    throw new Error(`price-cut failed (${res.status}): ${detail}`);
-  }
-  return body.results;
-}
-
-async function checkItems(ctx: WeeklyCtx, items: WatchItem[]) {
-  const todo = items.filter((w) => !ctx.results.has(w.id));
-  for (const w of todo) ctx.results.set(w.id, []); // claim them so parallel dispatches don't double up
-  const remote = Boolean(process.env.VERCEL) && appOrigin() !== null;
-  const priceOne = async (w: WatchItem, i: number) => {
-    try {
-      let res: PriceResult[];
-      if (remote) {
-        await new Promise((r) => setTimeout(r, i * DISPATCH_STAGGER_MS));
-        res = await priceCutRemotely(w, ctx.trace);
-      } else {
-        res = await getItemPrices(w.name, { source: "weekly", watchItemId: w.id, trace: ctx.trace });
-      }
-      ctx.results.set(w.id, res.map((r) => ({ ...r, item: w.name })));
-    } catch (err) {
-      ctx.trace.add("Deal Hunter", "error", `${w.name}: ${err instanceof Error ? err.message : err}`);
-    }
-  };
-  if (remote) await Promise.all(todo.map(priceOne));
-  else await mapLimit(todo.map((w, i) => [w, i] as const), CONCURRENCY, ([w, i]) => priceOne(w, i));
-}
-
-const weeklyTools: AgentTool<WeeklyCtx>[] = [
+const dispatchTools: AgentTool<DispatchCtx>[] = [
   {
     name: "dispatch_deal_hunters",
-    description:
-      "Send Deal Hunters (each checked by the Cut Inspector) to price these watch-list cuts at every store, in parallel. Returns each cut's verified sale deals and its lowest everyday per-lb price.",
+    description: "Send a Deal Hunter (checked by the Cut Inspector) to price each of these watch-list cuts at every store.",
     parameters: {
       type: "object",
       properties: { cuts: { type: "array", items: { type: "string" }, description: "Watch-list cut names, exactly as listed" } },
@@ -180,32 +144,79 @@ const weeklyTools: AgentTool<WeeklyCtx>[] = [
     async run(args, ctx) {
       const names = (args.cuts as string[]).map((n) => n.toLowerCase());
       const chosen = ctx.items.filter((w) => names.includes(w.name.toLowerCase()));
-      await checkItems(ctx, chosen);
-      return chosen.map((w) => {
-        const results = ctx.results.get(w.id) ?? [];
-        const best = lowestEveryday(results)[0];
-        return {
-          cut: w.name,
-          deals: results
-            .filter((r) => r.status === "found" && r.on_sale)
-            .map((d) => ({ store: d.store, product: d.product_name, price: priceLine(d), promo: d.promo_text })),
-          lowest_everyday: best ? { store: best.store, product: best.product_name, per_lb: best.per_lb } : null,
-        };
-      });
+      for (const w of chosen) ctx.dispatched.add(w.id);
+      return { dispatched: chosen.map((w) => w.name), not_on_watch_list: (args.cuts as string[]).filter((n) => !chosen.some((w) => w.name.toLowerCase() === n.toLowerCase())) };
     },
   },
 ];
 
-const WEEKLY_SYSTEM = `${HAPPY_BUTCHER_SYSTEM}
+/** The Butcher decides which cuts to send Hunters for; code makes sure none are skipped. */
+async function butcherDispatch(items: WatchItem[], stores: Store[], trace: Trace): Promise<WatchItem[]> {
+  const ctx: DispatchCtx = { items, dispatched: new Set() };
+  try {
+    await runAgent(
+      {
+        name: "Happy Butcher",
+        system: START_SYSTEM,
+        tools: dispatchTools,
+        maxRounds: 3,
+        submit: {
+          name: "confirm_dispatch",
+          description: "Confirm the Deal Hunters are out.",
+          parameters: { type: "object", properties: { note: { type: "string" } }, required: ["note"] },
+          parse: (raw) => z.object({ note: z.string() }).parse(raw),
+        },
+      },
+      `Watch list:\n${items.map((w) => `- ${w.name}`).join("\n")}\n\nStores: ${stores.map((s) => s.name).join(", ")}`,
+      ctx,
+      trace,
+    );
+  } catch (err) {
+    trace.add("Happy Butcher", "error", `dispatch: ${err instanceof Error ? err.message : err}`);
+  }
+  const skipped = items.filter((w) => !ctx.dispatched.has(w.id));
+  if (skipped.length) trace.add("Happy Butcher", "handoff", `backstop: dispatching ${skipped.length} cuts the routine didn't send`);
+  return items;
+}
 
-It's Wednesday morning and the new weekly ads just dropped. Your routine:
-1. Dispatch Deal Hunters for every cut on the watch list (you can send them all at once).
-2. Read what comes back: verified sales, plus each cut's lowest everyday price.
-3. Submit the rundown: an intro (2-3 sentences in your voice, calling out the best one or two deals by cut and store, and a standout everyday price if there is one) and a one-line sign-off. Do NOT write prices or numbers; the deals table is added to the email for you.`;
+/** The Butcher reads the verified results and writes the email's intro and sign-off. */
+async function butcherRundown(deals: Deal[], everyday: EverydayBest[], trace: Trace): Promise<Words> {
+  const fallback: Words = {
+    intro: `Mornin', neighbor! The new ads just dropped. I found ${deals.length} sale${deals.length === 1 ? "" : "s"} on your cuts, plus the lowest everyday prices around town.`,
+    signoff: "Happy cooking! — The Happy Butcher",
+  };
+  const summary = [
+    "SALES:",
+    ...deals.map((d) => `- ${d.item} at ${d.store}: ${d.product_name} ${priceLine(d)} ${d.promo_text ?? ""}`),
+    "LOWEST EVERYDAY (per lb):",
+    ...everyday.map((e) => `- ${e.item}: ${e.store}, ${e.product_name ?? ""} $${e.per_lb.toFixed(2)}/lb`),
+  ].join("\n");
+  try {
+    return await runAgent(
+      {
+        name: "Happy Butcher",
+        system: FINISH_SYSTEM,
+        tools: [],
+        maxRounds: 2,
+        submit: {
+          name: "submit_rundown",
+          description: "The email's intro and sign-off, in your voice. No prices.",
+          parameters: { type: "object", properties: { intro: { type: "string" }, signoff: { type: "string" } }, required: ["intro", "signoff"] },
+          parse: (raw) => z.object({ intro: z.string(), signoff: z.string() }).parse(raw),
+        },
+      },
+      summary,
+      {},
+      trace,
+    );
+  } catch (err) {
+    trace.add("Happy Butcher", "error", `rundown: ${err instanceof Error ? err.message : err}`);
+    return fallback;
+  }
+}
 
 export interface WeeklyReport {
   items: number;
-  stores: number;
   checks: number;
   deals: number;
   unverified: number;
@@ -216,71 +227,29 @@ export interface WeeklyReport {
   lowest_everyday: EverydayBest[];
 }
 
-export async function runWeeklyCheck(options: { sendEmail?: boolean } = {}): Promise<WeeklyReport> {
-  const [items, stores] = await Promise.all([listWatchItems(), listStores()]);
-  const trace = new Trace();
-  const ctx: WeeklyCtx = { items, trace, results: new Map() };
-
-  let words = { intro: "", signoff: "Happy cooking! — The Happy Butcher" };
-  try {
-    words = await runAgent(
-      {
-        name: "Happy Butcher",
-        system: WEEKLY_SYSTEM,
-        tools: weeklyTools,
-        maxRounds: 4,
-        submit: {
-          name: "submit_rundown",
-          description: "The email's intro and sign-off, in your voice. No prices.",
-          parameters: {
-            type: "object",
-            properties: { intro: { type: "string" }, signoff: { type: "string" } },
-            required: ["intro", "signoff"],
-          },
-          parse: (raw) => z.object({ intro: z.string(), signoff: z.string() }).parse(raw),
-        },
-      },
-      `Watch list:\n${items.map((w) => `- ${w.name}`).join("\n")}\n\nStores: ${stores.map((s) => s.name).join(", ")}`,
-      ctx,
-      trace,
-    );
-  } catch (err) {
-    trace.add("Happy Butcher", "error", `weekly routine: ${err instanceof Error ? err.message : err}`);
-  }
-
-  // Every watched cut gets checked, even if the Butcher skipped one.
-  const skipped = items.filter((w) => !ctx.results.has(w.id));
-  if (skipped.length) {
-    trace.add("Happy Butcher", "handoff", `backstop: checking ${skipped.length} cuts the routine did not dispatch`);
-    await checkItems(ctx, skipped);
-  }
-
-  const all = [...ctx.results.values()].flat();
+/** Picks the sales and everyday bests out of a run's results, has the Butcher write it up, sends the email. */
+async function deliver(all: Deal[], trace: Trace, runId: number | null, sendEmail: boolean): Promise<WeeklyReport> {
   const deals = all.filter((r) => r.status === "found" && r.on_sale);
   const everyday = lowestEveryday(all);
-  if (!words.intro && (deals.length || everyday.length)) {
-    words.intro = `Mornin', neighbor! The new ads just dropped and I found ${deals.length} deal${deals.length === 1 ? "" : "s"} on your cuts.`;
-  }
-
   const report: WeeklyReport = {
-    items: items.length,
-    stores: stores.length,
+    items: new Set(all.map((r) => r.item)).size,
     checks: all.length,
     deals: deals.length,
     unverified: all.filter((r) => r.status === "unverified").length,
     emailed: false,
     email_error: null,
-    run_id: null,
+    run_id: runId,
     deal_list: deals.map((d) => ({ item: d.item, store: d.store, product: d.product_name, price: priceLine(d) })),
     lowest_everyday: everyday,
   };
 
   // Sales plus lowest everyday prices; nothing to report means no email.
   const hasNews = deals.length > 0 || everyday.length > 0;
-  if (!hasNews || options.sendEmail === false) {
+  if (!hasNews || !sendEmail) {
     await run(sql`insert into public.notifications (summary_text, delivered, error)
       values (${hasNews ? "Email skipped (dry run)" : "Nothing to report this week; no email sent"}, false, null)`);
   } else {
+    const words = await butcherRundown(deals, everyday, trace);
     const { text, html } = renderEmail(deals, everyday, words, process.env.APP_URL || null);
     try {
       const resend = new Resend(requireEnv("RESEND_API_KEY"));
@@ -299,8 +268,54 @@ export async function runWeeklyCheck(options: { sendEmail?: boolean } = {}): Pro
     await run(sql`insert into public.notifications (summary_text, delivered, error) values (${text}, ${report.emailed}, ${report.email_error})`);
   }
 
-  const outcome = report.emailed ? "sent" : options.sendEmail === false ? "skipped (dry run)" : hasNews ? "failed" : "not needed";
-  trace.add("Happy Butcher", "submit", `${deals.length} deals; email ${outcome}`);
-  report.run_id = await saveAgentRun("weekly", `${deals.length} deals from ${all.length} checks`, trace.events).catch(() => null);
+  const outcome = report.emailed ? "sent" : !sendEmail ? "skipped (dry run)" : hasNews ? "failed" : "not needed";
+  trace.add("Happy Butcher", "submit", `${deals.length} deals, ${everyday.length} everyday bests; email ${outcome}`);
   return report;
+}
+
+/** Scrape store ad pages once so parallel Hunters read the cache instead of each scraping. */
+async function prewarmAdPages(stores: Store[]) {
+  await Promise.all(stores.map((s) => getScrapedAd(s).catch(() => null)));
+}
+
+// --- Step 1: start ---------------------------------------------------------------------------
+export async function startWeeklyRun(): Promise<{ run_id: number; cuts: { id: number; name: string }[] }> {
+  const [items, stores] = await Promise.all([listWatchItems(), listStores()]);
+  const runId = await createAgentRun("weekly", "Wednesday check (in progress)");
+  const trace = new Trace();
+  const [cuts] = await Promise.all([butcherDispatch(items, stores, trace), prewarmAdPages(stores)]);
+  await appendAgentRun(runId, trace.events);
+  return { run_id: runId, cuts: cuts.map((w) => ({ id: w.id, name: w.name })) };
+}
+
+// --- Step 2: one cut (called per cut by /api/price-cut) ---------------------------------------
+export async function huntCut(runId: number | null, item: WatchItem): Promise<PriceResult[]> {
+  const trace = new Trace();
+  try {
+    return await getItemPrices(item.name, { source: "weekly", watchItemId: item.id, trace, runId });
+  } finally {
+    if (runId) await appendAgentRun(runId, trace.events).catch(() => undefined);
+  }
+}
+
+// --- Step 3: finish ---------------------------------------------------------------------------
+export async function finishWeeklyRun(runId: number, options: { sendEmail?: boolean } = {}): Promise<WeeklyReport> {
+  const trace = new Trace();
+  const all = await runResults(runId);
+  const report = await deliver(all, trace, runId, options.sendEmail !== false);
+  await appendAgentRun(runId, trace.events, `${report.deals} deals, ${report.lowest_everyday.length} everyday bests from ${report.checks} checks`);
+  return report;
+}
+
+// --- All three in one process (local dev, dry runs) --------------------------------------------
+const CONCURRENCY = 8;
+
+export async function runWeeklyCheck(options: { sendEmail?: boolean } = {}): Promise<WeeklyReport> {
+  const { run_id, cuts } = await startWeeklyRun();
+  const items = await listWatchItems();
+  await mapLimit(cuts, CONCURRENCY, async (c) => {
+    const item = items.find((w) => w.id === c.id);
+    if (item) await huntCut(run_id, item).catch(() => undefined);
+  });
+  return finishWeeklyRun(run_id, options);
 }

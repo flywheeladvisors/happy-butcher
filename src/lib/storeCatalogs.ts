@@ -124,7 +124,9 @@ async function fetchHarrisTeeter(locationId: string, query: string): Promise<Cat
       "accept-language": "en-US,en;q=0.9",
       cookie,
     },
-    signal: AbortSignal.timeout(25_000),
+    // Short: from some networks (e.g. cloud hosts) the site stalls instead of answering; the
+    // Deal Hunter then falls back to the weekly ad.
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`Harris Teeter search failed (${res.status})`);
   const html = await res.text();

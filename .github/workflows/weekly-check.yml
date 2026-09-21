@@ -1,12 +1,15 @@
-# Wednesday-morning alarm clock: calls the deployed /api/weekly-check, which prices every watched
-# cut at every store and emails only the sale items. The work runs in the Vercel function.
+# Wednesday-morning run of the Happy Butcher's agent team, in three steps so no single Vercel
+# function call has to price every cut within its time limit:
+#   1. start  - the Butcher dispatches Deal Hunters; returns the run id and the cuts
+#   2. hunt   - one call per cut (Deal Hunter + Cut Inspector), a few at a time
+#   3. finish - the Butcher writes the rundown from the run's verified results; the email goes out
 #
 # GitHub cron is UTC. 12:00 UTC = 8am Eastern while on EDT (Mar-Nov).
 # DST reminder: when clocks fall back in November (EST), change to "0 13 * * 3" to stay at 8am;
 # switch back to "0 12 * * 3" in March.
 #
 # Repo secrets:
-#   WEEKLY_CHECK_URL  https://<app>/api/weekly-check
+#   WEEKLY_CHECK_URL  https://<app>/api/weekly-check   (the per-cut calls go to <app>/api/price-cut)
 #   CRON_SECRET       same value as in Vercel
 name: Wednesday meat deals
 
@@ -23,19 +26,36 @@ on:
 jobs:
   weekly-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 20
+    env:
+      WEEKLY_CHECK_URL: ${{ secrets.WEEKLY_CHECK_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      DRY: ${{ inputs.dry_run && '&dry=1' || '' }}
     steps:
-      - name: Call /api/weekly-check
-        env:
-          WEEKLY_CHECK_URL: ${{ secrets.WEEKLY_CHECK_URL }}
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
-          DRY: ${{ inputs.dry_run && '?dry=1' || '' }}
+      - name: 1. Start (Butcher dispatches the Deal Hunters)
         run: |
-          status=$(curl -sS -o response.json -w "%{http_code}" -X POST "$WEEKLY_CHECK_URL$DRY" \
+          status=$(curl -sS -o start.json -w "%{http_code}" -X POST "$WEEKLY_CHECK_URL?phase=start" \
             -H "Authorization: Bearer $CRON_SECRET" --max-time 300) || status="curl-error"
-          jq . response.json 2>/dev/null || cat response.json
-          if [ "$status" != "200" ]; then
-            echo "::error::Weekly check failed with HTTP $status"
-            exit 1
-          fi
-          jq -r '"Checked \(.checks) item x store combos, \(.deals) deals, emailed: \(.emailed)"' response.json >> "$GITHUB_STEP_SUMMARY"
+          jq . start.json 2>/dev/null || cat start.json
+          if [ "$status" != "200" ]; then echo "::error::Start failed with HTTP $status"; exit 1; fi
+          echo "RUN_ID=$(jq -r .run_id start.json)" >> "$GITHUB_ENV"
+
+      - name: 2. Hunt (one Deal Hunter + Cut Inspector per cut, 5 at a time)
+        run: |
+          PRICE_CUT_URL="${WEEKLY_CHECK_URL%/weekly-check}/price-cut"
+          export PRICE_CUT_URL
+          jq -r '.cuts[].id' start.json | xargs -P 5 -I{} sh -c '
+            code=$(curl -sS -o "cut_{}.json" -w "%{http_code}" -X POST "$PRICE_CUT_URL" \
+              -H "Authorization: Bearer $CRON_SECRET" -H "Content-Type: application/json" \
+              -d "{\"watchItemId\": {}, \"runId\": $RUN_ID}" --max-time 300) || code="curl-error"
+            echo "cut {}: HTTP $code $(cat cut_{}.json 2>/dev/null)"
+            [ "$code" = "200" ] || echo "::warning::cut {} failed (HTTP $code)"
+          '
+
+      - name: 3. Finish (Butcher writes the rundown, email goes out)
+        run: |
+          status=$(curl -sS -o response.json -w "%{http_code}" -X POST "$WEEKLY_CHECK_URL?phase=finish&run=$RUN_ID$DRY" \
+            -H "Authorization: Bearer $CRON_SECRET" --max-time 300) || status="curl-error"
+          jq 'del(.deal_list, .lowest_everyday)' response.json 2>/dev/null || cat response.json
+          if [ "$status" != "200" ]; then echo "::error::Finish failed with HTTP $status"; exit 1; fi
+          jq -r '"Run \(.run_id): \(.checks) item x store checks, \(.deals) sales, \(.lowest_everyday | length) everyday bests, emailed: \(.emailed)"' response.json >> "$GITHUB_STEP_SUMMARY"

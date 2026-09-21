@@ -1,5 +1,5 @@
 import "server-only";
-import { all, insert, sql } from "./db";
+import { all, insert, run, sql } from "./db";
 import type { PriceResult, Store, WatchItem } from "./types";
 
 export const listStores = () => all<Store>(sql`select to_jsonb(s) as row from public.stores s order by s.name`);
@@ -72,7 +72,7 @@ export async function removeStores(ids: number[]): Promise<string[]> {
 
 export async function savePriceChecks(
   results: PriceResult[],
-  meta: { itemQuery: string; watchItemId: number | null; source: "chat" | "weekly" },
+  meta: { itemQuery: string; watchItemId: number | null; source: "chat" | "weekly"; runId?: number | null },
 ): Promise<void> {
   if (results.length === 0) return;
   await insert(
@@ -91,8 +91,33 @@ export async function savePriceChecks(
       product_url: r.product_url,
       note: r.note,
       source: meta.source,
+      run_id: meta.runId ?? null,
     })),
   );
+}
+
+/** A Wednesday run's saved results (the per-cut calls write them; the finish step reads them back). */
+export async function runResults(runId: number): Promise<(PriceResult & { item: string })[]> {
+  return all<PriceResult & { item: string }>(sql`
+    select to_jsonb(x) as row from (
+      select pc.item_query as item, pc.store_id, s.name as store, pc.status, pc.product_name, pc.regular_price, pc.sale_price,
+             pc.unit_price, pc.on_sale, pc.promo_text, pc.product_url, pc.note
+      from public.price_checks pc join public.stores s on s.id = pc.store_id
+      where pc.run_id = ${runId}
+      order by pc.item_query, s.name) x`);
+}
+
+export async function createAgentRun(kind: "chat" | "weekly" | "store", summary: string): Promise<number> {
+  const [row] = await all<{ id: number }>(sql`
+    insert into public.agent_runs as r (kind, summary, events) values (${kind}, ${summary}, '[]'::jsonb) returning to_jsonb(r) as row`);
+  return row.id;
+}
+
+/** Appends trace events to a run (the per-cut calls and the finish step each add theirs). */
+export async function appendAgentRun(runId: number, events: unknown[], summary?: string): Promise<void> {
+  await run(sql`
+    update public.agent_runs set events = events || ${JSON.stringify(events)}::jsonb, summary = coalesce(${summary ?? null}, summary)
+    where id = ${runId}`);
 }
 
 export interface HistoryPoint {

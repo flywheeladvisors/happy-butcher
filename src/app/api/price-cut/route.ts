@@ -1,15 +1,14 @@
 import { z } from "zod";
-import { Trace } from "@/lib/agents/runtime";
 import { hasCronSecret } from "@/lib/cronAuth";
-import { getItemPrices } from "@/lib/prices";
 import { getWatchItem } from "@/lib/queries";
+import { huntCut } from "@/lib/weeklyCheck";
 
-// One Deal Hunter + Cut Inspector job for one watched cut, in its own function invocation.
-// The Wednesday check fans out to this route (one call per cut) so each cut gets its own time
-// budget instead of all fifteen sharing one. Same CRON_SECRET auth as /api/weekly-check.
+// One Deal Hunter + Cut Inspector job for one watched cut, in its own function call, so each cut
+// of the Wednesday run gets its own time budget. Results are saved with the run id; the trace is
+// appended to the run. Same CRON_SECRET auth as /api/weekly-check.
 export const maxDuration = 300;
 
-const Body = z.object({ watchItemId: z.number().int() });
+const Body = z.object({ watchItemId: z.number().int(), runId: z.number().int().nullable().optional() });
 
 export async function POST(request: Request) {
   if (!hasCronSecret(request)) return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -19,11 +18,14 @@ export async function POST(request: Request) {
   const item = await getWatchItem(parsed.data.watchItemId);
   if (!item) return Response.json({ error: "Unknown watch item" }, { status: 404 });
 
-  const trace = new Trace();
   try {
-    const results = await getItemPrices(item.name, { source: "weekly", watchItemId: item.id, trace });
-    return Response.json({ results, trace: trace.events });
+    const results = await huntCut(parsed.data.runId ?? null, item);
+    return Response.json({
+      cut: item.name,
+      found: results.filter((r) => r.status === "found").length,
+      on_sale: results.filter((r) => r.on_sale).length,
+    });
   } catch (err) {
-    return Response.json({ error: err instanceof Error ? err.message : String(err), trace: trace.events }, { status: 500 });
+    return Response.json({ cut: item.name, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
   }
 }
