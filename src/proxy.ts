@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { checkBasicAuth } from "@/lib/basicAuth";
 
-// Password-protects every page and API route. /api/weekly-check is excluded because it
-// authenticates with CRON_SECRET instead.
+// Password-protects every page and API route. /api/weekly-check and /api/env-check are excluded
+// because they authenticate with CRON_SECRET instead.
 export function proxy(request: NextRequest) {
   const access = checkBasicAuth(request.headers.get("authorization"));
   if (access === "ok") return NextResponse.next();
@@ -16,5 +16,5 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!api/weekly-check|_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!api/weekly-check|api/env-check|_next/static|_next/image|favicon.ico).*)"],
 };
