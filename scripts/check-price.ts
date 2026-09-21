@@ -1,11 +1,17 @@
 // Standalone price lookup, outside the chat: npx tsx --conditions react-server --env-file=.env.local scripts/check-price.ts "ribeye steaks" [chat|weekly]
+import { Trace } from "../src/lib/agents/runtime";
 import { getItemPrices } from "../src/lib/prices";
 
 const item = process.argv[2] ?? "ribeye steaks";
 const source = (process.argv[3] as "chat" | "weekly") ?? "weekly";
 async function main() {
 const started = Date.now();
-const results = await getItemPrices(item, { source });
+const trace = new Trace();
+const results = await getItemPrices(item, { source, trace }).catch((err) => {
+  for (const e of trace.events) console.log(`  [${e.agent}] ${e.kind}: ${e.summary}`);
+  throw err;
+});
+for (const e of trace.events) console.log(`  [${e.agent}] ${e.kind}: ${e.summary}`);
 console.table(
   results.map((r) => ({
     store: r.store,

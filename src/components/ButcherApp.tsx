@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { AgentName, TraceEvent } from "@/lib/agents/runtime";
 import type { DashboardStats } from "@/lib/queries";
 import type { Store, WatchItem } from "@/lib/types";
 
@@ -12,18 +13,20 @@ interface Summary {
   watchItems: WatchItem[];
 }
 
-interface ToolEvent {
-  name: string;
-  args: Record<string, unknown> | string;
-  ok: boolean;
-}
-
 interface Message {
   role: "user" | "assistant";
   content: string;
-  toolEvents?: ToolEvent[];
+  trace?: TraceEvent[];
   error?: boolean;
 }
+
+const AGENTS: { name: AgentName; tone: string; role: string }[] = [
+  { name: "Happy Butcher", tone: "bg-neutral-900", role: "Talks to you, sends the team out" },
+  { name: "Store Scout", tone: "bg-sky-500", role: "Pins down store locations and ads" },
+  { name: "Deal Hunter", tone: "bg-amber-500", role: "Searches ads and store sites" },
+  { name: "Cut Inspector", tone: "bg-red-500", role: "Verifies the cut and the sale" },
+];
+const agentTone = (name: AgentName) => AGENTS.find((a) => a.name === name)?.tone ?? "bg-neutral-400";
 
 const QUICK_START = [
   { title: "Ribeye check", tone: "bg-red-500", prompt: "What's ribeye running at Harris Teeter right now?", blurb: "Current price, sale or not, with the link." },
@@ -31,12 +34,6 @@ const QUICK_START = [
   { title: "My stores", tone: "bg-sky-500", prompt: "Which stores are you keeping an eye on for us?", blurb: "Add more any time; it never replaces the list." },
   { title: "Watch list", tone: "bg-emerald-500", prompt: "What's on my watch list right now?", blurb: "The cuts the Wednesday check looks for." },
 ];
-
-const TOOL_LABELS: Record<string, string> = {
-  update_store_list: "Store list",
-  manage_watch_list: "Watch list",
-  get_item_prices: "Price check",
-};
 
 function cutGroup(name: string): "Beef" | "Chicken" | "Pork" | "Other" {
   const n = name.toLowerCase();
@@ -47,12 +44,6 @@ function cutGroup(name: string): "Beef" | "Chicken" | "Pork" | "Other" {
 }
 
 const GROUP_TONE = { Beef: "bg-red-500", Chicken: "bg-amber-500", Pork: "bg-pink-400", Other: "bg-neutral-400" } as const;
-
-function toolSummary(e: ToolEvent): string {
-  const args = typeof e.args === "object" && e.args ? e.args : {};
-  if (e.name === "get_item_prices") return `${TOOL_LABELS[e.name]}: ${String(args.item ?? "")}`;
-  return `${TOOL_LABELS[e.name] ?? e.name}: ${String(args.action ?? "")}`;
-}
 
 function formatWhen(iso: string | null): string {
   if (!iso) return "Not yet";
@@ -99,8 +90,8 @@ export default function ButcherApp({ initial }: { initial: Summary }) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
-      setMessages([...history, { role: "assistant", content: data.reply, toolEvents: data.toolEvents }]);
-      if (data.toolEvents?.length) void refreshSummary();
+      setMessages([...history, { role: "assistant", content: data.reply, trace: data.trace }]);
+      if (data.trace?.length) void refreshSummary();
     } catch (err) {
       setMessages([
         ...history,
@@ -145,6 +136,21 @@ export default function ButcherApp({ initial }: { initial: Summary }) {
                   </li>
                 ))}
                 {summary.stores.length === 0 && <li className="px-2 text-[13px] text-neutral-400">Tell the butcher where you shop.</li>}
+              </ul>
+            </section>
+
+            <section>
+              <SectionLabel>The crew</SectionLabel>
+              <ul className="space-y-1">
+                {AGENTS.map((a) => (
+                  <li key={a.name} className="flex items-start gap-2 px-2 py-0.5">
+                    <span className={`mt-1 h-2 w-2 shrink-0 rounded-[3px] ${a.tone}`} />
+                    <span className="min-w-0">
+                      <span className="block text-[13px] text-neutral-700">{a.name}</span>
+                      <span className="block text-[11px] text-neutral-400">{a.role}</span>
+                    </span>
+                  </li>
+                ))}
               </ul>
             </section>
 
@@ -312,6 +318,38 @@ function SectionLabel({ children, count }: { children: React.ReactNode; count?: 
   );
 }
 
+/** Which agents worked on a reply, and (expandable) every step and handoff they took. */
+function AgentActivity({ trace }: { trace: TraceEvent[] }) {
+  const involved = AGENTS.filter((a) => trace.some((e) => e.agent === a.name));
+  const handoffs = trace.filter((e) => e.kind === "handoff").length;
+  return (
+    <details className="group mb-1.5 rounded-lg border border-neutral-200 bg-white text-[12px]">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-1.5 px-2.5 py-1.5 text-neutral-600">
+        {involved.map((a, i) => (
+          <span key={a.name} className="flex items-center gap-1.5">
+            {i > 0 && <span className="text-neutral-300">→</span>}
+            <span className={`h-2 w-2 rounded-[3px] ${a.tone}`} />
+            {a.name}
+          </span>
+        ))}
+        <span className="ml-auto text-[11px] text-neutral-400">
+          {trace.length} steps{handoffs ? `, ${handoffs} handoffs` : ""} <span className="group-open:hidden">▸</span>
+          <span className="hidden group-open:inline">▾</span>
+        </span>
+      </summary>
+      <ol className="max-h-72 space-y-0.5 overflow-y-auto border-t border-neutral-100 px-2.5 py-2">
+        {trace.map((e, i) => (
+          <li key={i} className={`flex gap-2 ${e.kind === "error" ? "text-red-600" : e.kind === "handoff" ? "font-medium text-neutral-800" : "text-neutral-500"}`}>
+            <span className={`mt-1 h-2 w-2 shrink-0 rounded-[3px] ${agentTone(e.agent)}`} />
+            <span className="w-24 shrink-0 text-neutral-400">{e.agent}</span>
+            <span className="min-w-0">{e.summary}</span>
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
 function MessageBubble({ message }: { message: Message }) {
   if (message.role === "user") {
     return (
@@ -324,19 +362,7 @@ function MessageBubble({ message }: { message: Message }) {
     <div className="flex gap-3">
       <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-neutral-900 text-[10px] font-bold text-white">HB</span>
       <div className="min-w-0 flex-1">
-        {message.toolEvents && message.toolEvents.length > 0 && (
-          <div className="mb-1.5 flex flex-wrap gap-1.5">
-            {message.toolEvents.map((e, i) => (
-              <span
-                key={i}
-                className={`rounded-md border px-2 py-0.5 text-[11px] ${e.ok ? "border-neutral-200 text-neutral-500" : "border-red-200 text-red-600"}`}
-              >
-                {toolSummary(e)}
-                {!e.ok && " (failed)"}
-              </span>
-            ))}
-          </div>
-        )}
+        {message.trace && message.trace.length > 0 && <AgentActivity trace={message.trace} />}
         <div
           className={`prose-butcher rounded-2xl rounded-tl-md border px-4 py-2.5 text-[14px] leading-relaxed ${
             message.error ? "border-red-200 bg-red-50 text-red-700" : "border-neutral-100 bg-neutral-50/70 text-neutral-800"

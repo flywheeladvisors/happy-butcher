@@ -57,3 +57,17 @@ create table if not exists public.page_cache (
   markdown   text not null,
   fetched_at timestamptz not null default now()
 );
+
+-- Added with the multi-agent build: what the Store Scout learned about each location.
+alter table public.stores add column if not exists address text;
+alter table public.stores add column if not exists ad_source text check (ad_source in ('flipp', 'store_page', 'none'));
+alter table public.stores add column if not exists scout_notes text;
+
+-- Who did what: the agent trace for each chat reply, Store Scout run, and Wednesday check.
+create table if not exists public.agent_runs (
+  id         bigint generated always as identity primary key,
+  kind       text not null check (kind in ('chat', 'weekly', 'store')),
+  summary    text not null,
+  events     jsonb not null,
+  created_at timestamptz not null default now()
+);

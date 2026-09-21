@@ -2,15 +2,20 @@
 
 A chat app that watches your stores' weekly ads for sales on the fresh meats you actually buy, and emails a sale-only rundown every Wednesday morning.
 
-## How prices are found (`get_item_prices`)
+## The crew (multi-agent)
 
-1. **Flipp weekly-ad search** by each store's ZIP: location-correct circular listings for all six chains.
-2. **Store's own weekly-ad page via Firecrawl** where the store can be pinned by URL (Publix `?setstorenumber=`).
-3. **Matcher** (Claude via OpenRouter) picks the listing that really is the requested cut: marinated ≠ plain, pork loin ≠ pork tenderloin, boneless required when asked.
-4. **Regular vs sale** split deterministically from the ad text (`src/lib/priceParse.ts`): crossed-out price, "Save $X", "save up to $X" (approximate), BOGO, "HOT SALE".
-5. **Chat only:** stores with no ad match get a Tavily (`site:`) + Firecrawl product-page lookup, returned as `unverified` since most chains set the store by cookie.
+Four agents, each with its own instructions, tools, and loop (). They hand work to each other and every step is recorded (shown in the chat's agent-activity panel; saved to ).
 
-Every result is written to `price_checks` (price history).
+| Agent | Role | Tools |
+|---|---|---|
+| **Happy Butcher** () | Orchestrator. Talks to the customer, delegates, writes answers and the Wednesday rundown. | , , ; Wednesdays:  |
+| **Store Scout** () | Resolves a new store to an exact location (address, ZIP, store number) and a reachable weekly ad. | ZIP lookup, weekly-ad coverage by ZIP, Tavily, Firecrawl |
+| **Deal Hunter** () | For one cut, searches weekly ads by ZIP (Flipp), the store's own ad page (Publix via Firecrawl), and in chat the store's website (Tavily  + Firecrawl). Submits one candidate per store as evidence ids. | , , ,  |
+| **Cut Inspector** () | Skeptic. Checks each candidate is the exact cut (marinated ≠ plain, loin ≠ tenderloin, lean ratios), that the price was read right and applies to our store, and whether it's really a sale. Approves, marks unverified, or rejects and sends the Hunter back with a hint. | , ,  |
+
+**Price check flow** (): Butcher → Deal Hunter → Cut Inspector → (rejects with hints) → Deal Hunter → Cut Inspector → prices parsed deterministically from the approved raw evidence (), so no model re-types a number. Product-page prices are always  (most chains pick the store by cookie).
+
+**Wednesday** (): the Butcher dispatches Deal Hunters for every watched cut (code backstops any he skips), reads the verified deals, and writes the intro/sign-off; the deals table in the email is rendered from the results.
 
 ## Local dev
 

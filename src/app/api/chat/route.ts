@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { runAgent } from "@/lib/agent";
+import { runButcherChat } from "@/lib/agents/butcher";
 
-// Price lookups hit six stores (search + scrape + extraction each), so allow a long run.
+// A reply can involve several agents (Store Scout, Deal Hunter, Cut Inspector), so allow a long run.
 export const maxDuration = 300;
 
 const Body = z.object({
@@ -16,7 +16,7 @@ export async function POST(request: Request) {
   if (!parsed.success) return Response.json({ error: "Invalid request" }, { status: 400 });
 
   try {
-    return Response.json(await runAgent(parsed.data.messages));
+    return Response.json(await runButcherChat(parsed.data.messages));
   } catch (err) {
     console.error("chat failed", err);
     return Response.json({ error: err instanceof Error ? err.message : "Chat failed" }, { status: 500 });

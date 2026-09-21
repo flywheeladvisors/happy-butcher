@@ -7,6 +7,9 @@ export interface Store {
   store_number: string | null;
   base_url: string;
   weekly_ad_url: string | null;
+  address: string | null;
+  ad_source: "flipp" | "store_page" | "none" | null;
+  scout_notes: string | null;
   created_at: string;
 }
 

@@ -1,22 +1,25 @@
 import "server-only";
 import { Resend } from "resend";
+import { z } from "zod";
+import { runAgent, Trace, type AgentTool } from "./agents/runtime";
 import { run, sql } from "./db";
 import { requireEnv } from "./env";
-import { chatCompletion } from "./openrouter";
 import { HAPPY_BUTCHER_SYSTEM } from "./persona";
 import { getItemPrices } from "./prices";
-import { listStores, listWatchItems } from "./queries";
-import type { PriceResult } from "./types";
+import { listStores, listWatchItems, saveAgentRun } from "./queries";
+import type { PriceResult, WatchItem } from "./types";
 
-// The Wednesday job: every watch item x every store, keep only what's on sale, email the rundown.
-// Prices in the email come straight from the results (rendered here); the model only writes the
-// Happy Butcher's intro and sign-off, so it can't misstate a number.
+// The Wednesday check, run by the agent team:
+//   Happy Butcher reviews the watch list and dispatches Deal Hunters (each paired with the Cut
+//   Inspector) for the cuts, reads what comes back, and writes the rundown.
+//   Code guarantees every watched cut gets checked, keeps only verified sales, and renders the
+//   prices into the email itself, so no model can misstate a number.
 
 export interface Deal extends PriceResult {
   item: string;
 }
 
-const CONCURRENCY = 3;
+const CONCURRENCY = 4;
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -41,31 +44,6 @@ function priceLine(d: Deal): string {
   if (sale && reg) return `${sale} (reg. ${reg}${d.note?.includes("estimated") ? " approx." : ""})`;
   if (sale) return sale;
   return d.promo_text ?? "On sale";
-}
-
-async function butcherWords(deals: Deal[]): Promise<{ intro: string; signoff: string }> {
-  const fallback = {
-    intro: deals.length ? `Mornin', neighbor! The new ads just dropped and I found ${deals.length} deal${deals.length === 1 ? "" : "s"} on your cuts.` : "",
-    signoff: "Happy cooking! — The Happy Butcher",
-  };
-  try {
-    const summary = deals.map((d) => `${d.item} at ${d.store}: ${d.product_name} ${priceLine(d)} ${d.promo_text ?? ""}`).join("\n");
-    const { content } = await chatCompletion({
-      maxTokens: 400,
-      messages: [
-        { role: "system", content: HAPPY_BUTCHER_SYSTEM },
-        {
-          role: "user",
-          content: `Write the intro and sign-off for this Wednesday's deals email. The deals table is rendered separately, so do NOT list prices or numbers. Intro: 2-3 sentences, call out the best one or two deals by cut name. Sign-off: one line. Reply as JSON {"intro": "...", "signoff": "..."}.\n\nDeals:\n${summary}`,
-        },
-      ],
-    });
-    const parsed = JSON.parse((content ?? "").replace(/^```(?:json)?\s*|\s*```$/g, ""));
-    if (typeof parsed.intro === "string" && typeof parsed.signoff === "string") return parsed;
-  } catch {
-    // fall through to the canned words
-  }
-  return fallback;
 }
 
 export function renderEmail(deals: Deal[], words: { intro: string; signoff: string }, appUrl: string | null) {
@@ -117,6 +95,58 @@ export function renderEmail(deals: Deal[], words: { intro: string; signoff: stri
   return { text, html };
 }
 
+
+interface WeeklyCtx {
+  items: WatchItem[];
+  trace: Trace;
+  results: Map<number, Deal[]>;
+}
+
+async function checkItems(ctx: WeeklyCtx, items: WatchItem[]) {
+  const todo = items.filter((w) => !ctx.results.has(w.id));
+  for (const w of todo) ctx.results.set(w.id, []); // claim them so parallel dispatches don't double up
+  await mapLimit(todo, CONCURRENCY, async (w) => {
+    try {
+      const res = await getItemPrices(w.name, { source: "weekly", watchItemId: w.id, trace: ctx.trace });
+      ctx.results.set(w.id, res.map((r) => ({ ...r, item: w.name })));
+    } catch (err) {
+      ctx.trace.add("Deal Hunter", "error", `${w.name}: ${err instanceof Error ? err.message : err}`);
+    }
+  });
+}
+
+const weeklyTools: AgentTool<WeeklyCtx>[] = [
+  {
+    name: "dispatch_deal_hunters",
+    description:
+      "Send Deal Hunters (each checked by the Cut Inspector) to price these watch-list cuts at every store, in parallel. Returns each cut's verified sale deals.",
+    parameters: {
+      type: "object",
+      properties: { cuts: { type: "array", items: { type: "string" }, description: "Watch-list cut names, exactly as listed" } },
+      required: ["cuts"],
+    },
+    describe: (a) => `dispatched Deal Hunters for ${(a.cuts as string[]).length} cuts`,
+    async run(args, ctx) {
+      const names = (args.cuts as string[]).map((n) => n.toLowerCase());
+      const chosen = ctx.items.filter((w) => names.includes(w.name.toLowerCase()));
+      await checkItems(ctx, chosen);
+      return chosen.map((w) => ({
+        cut: w.name,
+        deals: (ctx.results.get(w.id) ?? [])
+          .filter((r) => r.status === "found" && r.on_sale)
+          .map((d) => ({ store: d.store, product: d.product_name, price: priceLine(d), promo: d.promo_text })),
+      }));
+    },
+  },
+];
+
+const WEEKLY_SYSTEM = `${HAPPY_BUTCHER_SYSTEM}
+
+It's Wednesday morning and the new weekly ads just dropped. Your routine:
+1. Dispatch Deal Hunters for every cut on the watch list (you can send them all at once).
+2. Read the verified deals that come back.
+3. Submit the rundown: an intro (2-3 sentences in your voice, calling out the best one or two deals by cut and store) and a one-line sign-off. Do NOT write prices or numbers; the deals table is added to the email for you.`;
+
 export interface WeeklyReport {
   items: number;
   stores: number;
@@ -125,21 +155,54 @@ export interface WeeklyReport {
   unverified: number;
   emailed: boolean;
   email_error: string | null;
+  run_id: number | null;
   deal_list: { item: string; store: string; product: string | null; price: string }[];
 }
 
 export async function runWeeklyCheck(options: { sendEmail?: boolean } = {}): Promise<WeeklyReport> {
   const [items, stores] = await Promise.all([listWatchItems(), listStores()]);
-  const perItem = await mapLimit(items, CONCURRENCY, async (w) => {
-    try {
-      return (await getItemPrices(w.name, { source: "weekly", watchItemId: w.id })).map((r) => ({ ...r, item: w.name }));
-    } catch (err) {
-      console.error(`weekly check failed for ${w.name}`, err);
-      return [] as Deal[];
-    }
-  });
-  const all = perItem.flat();
+  const trace = new Trace();
+  const ctx: WeeklyCtx = { items, trace, results: new Map() };
+
+  let words = { intro: "", signoff: "Happy cooking! — The Happy Butcher" };
+  try {
+    words = await runAgent(
+      {
+        name: "Happy Butcher",
+        system: WEEKLY_SYSTEM,
+        tools: weeklyTools,
+        maxRounds: 4,
+        submit: {
+          name: "submit_rundown",
+          description: "The email's intro and sign-off, in your voice. No prices.",
+          parameters: {
+            type: "object",
+            properties: { intro: { type: "string" }, signoff: { type: "string" } },
+            required: ["intro", "signoff"],
+          },
+          parse: (raw) => z.object({ intro: z.string(), signoff: z.string() }).parse(raw),
+        },
+      },
+      `Watch list:\n${items.map((w) => `- ${w.name}`).join("\n")}\n\nStores: ${stores.map((s) => s.name).join(", ")}`,
+      ctx,
+      trace,
+    );
+  } catch (err) {
+    trace.add("Happy Butcher", "error", `weekly routine: ${err instanceof Error ? err.message : err}`);
+  }
+
+  // Every watched cut gets checked, even if the Butcher skipped one.
+  const skipped = items.filter((w) => !ctx.results.has(w.id));
+  if (skipped.length) {
+    trace.add("Happy Butcher", "handoff", `backstop: checking ${skipped.length} cuts the routine did not dispatch`);
+    await checkItems(ctx, skipped);
+  }
+
+  const all = [...ctx.results.values()].flat();
   const deals = all.filter((r) => r.status === "found" && r.on_sale);
+  if (!words.intro && deals.length) {
+    words.intro = `Mornin', neighbor! The new ads just dropped and I found ${deals.length} deal${deals.length === 1 ? "" : "s"} on your cuts.`;
+  }
 
   const report: WeeklyReport = {
     items: items.length,
@@ -149,6 +212,7 @@ export async function runWeeklyCheck(options: { sendEmail?: boolean } = {}): Pro
     unverified: all.filter((r) => r.status === "unverified").length,
     emailed: false,
     email_error: null,
+    run_id: null,
     deal_list: deals.map((d) => ({ item: d.item, store: d.store, product: d.product_name, price: priceLine(d) })),
   };
 
@@ -156,25 +220,27 @@ export async function runWeeklyCheck(options: { sendEmail?: boolean } = {}): Pro
   if (deals.length === 0 || options.sendEmail === false) {
     await run(sql`insert into public.notifications (summary_text, delivered, error)
       values (${deals.length ? "Email skipped (dry run)" : "No deals this week; no email sent"}, false, null)`);
-    return report;
+  } else {
+    const { text, html } = renderEmail(deals, words, process.env.APP_URL || null);
+    try {
+      const resend = new Resend(requireEnv("RESEND_API_KEY"));
+      const { error } = await resend.emails.send({
+        from: requireEnv("RESEND_FROM_EMAIL"),
+        to: requireEnv("HOUSEHOLD_EMAIL"),
+        subject: `🥩 ${deals.length} meat deal${deals.length === 1 ? "" : "s"} this week`,
+        text,
+        html,
+      });
+      if (error) throw new Error(`${error.name}: ${error.message}`);
+      report.emailed = true;
+    } catch (err) {
+      report.email_error = err instanceof Error ? err.message : String(err);
+    }
+    await run(sql`insert into public.notifications (summary_text, delivered, error) values (${text}, ${report.emailed}, ${report.email_error})`);
   }
 
-  const words = await butcherWords(deals);
-  const { text, html } = renderEmail(deals, words, process.env.APP_URL || null);
-  try {
-    const resend = new Resend(requireEnv("RESEND_API_KEY"));
-    const { error } = await resend.emails.send({
-      from: requireEnv("RESEND_FROM_EMAIL"),
-      to: requireEnv("HOUSEHOLD_EMAIL"),
-      subject: `🥩 ${deals.length} meat deal${deals.length === 1 ? "" : "s"} this week`,
-      text,
-      html,
-    });
-    if (error) throw new Error(`${error.name}: ${error.message}`);
-    report.emailed = true;
-  } catch (err) {
-    report.email_error = err instanceof Error ? err.message : String(err);
-  }
-  await run(sql`insert into public.notifications (summary_text, delivered, error) values (${text}, ${report.emailed}, ${report.email_error})`);
+  const outcome = report.emailed ? "sent" : options.sendEmail === false ? "skipped (dry run)" : deals.length ? "failed" : "not needed";
+  trace.add("Happy Butcher", "submit", `${deals.length} deals; email ${outcome}`);
+  report.run_id = await saveAgentRun("weekly", `${deals.length} deals from ${all.length} checks`, trace.events).catch(() => null);
   return report;
 }

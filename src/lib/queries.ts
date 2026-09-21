@@ -12,13 +12,33 @@ export async function addStores(rows: Omit<Store, "id" | "created_at">[]): Promi
   const added: Store[] = [];
   for (const row of rows) {
     const [created] = await all<Store>(sql`
-      insert into public.stores as s (name, city, state, zip, store_number, base_url, weekly_ad_url)
-      values (${row.name}, ${row.city}, ${row.state}, ${row.zip}, ${row.store_number}, ${row.base_url}, ${row.weekly_ad_url})
+      insert into public.stores as s (name, city, state, zip, store_number, base_url, weekly_ad_url, address, ad_source, scout_notes)
+      values (${row.name}, ${row.city}, ${row.state}, ${row.zip}, ${row.store_number}, ${row.base_url}, ${row.weekly_ad_url},
+              ${row.address}, ${row.ad_source}, ${row.scout_notes})
       on conflict (lower(name), lower(city), lower(state)) do nothing
       returning to_jsonb(s) as row`);
     if (created) added.push(created);
   }
   return added;
+}
+
+/** A saved store with the same chain name (ignoring case/punctuation) in the same town, if any. */
+export async function findSavedStore(name: string, city: string, state: string): Promise<Store | null> {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
+  const stores = await listStores();
+  return (
+    stores.find(
+      (s) => norm(s.name) === norm(name) && s.city.toLowerCase() === city.trim().toLowerCase() && s.state.toLowerCase() === state.trim().toLowerCase(),
+    ) ?? null
+  );
+}
+
+/** Persists one agent trace (chat reply, Store Scout run, or Wednesday check). */
+export async function saveAgentRun(kind: "chat" | "weekly" | "store", summary: string, events: unknown[]): Promise<number | null> {
+  const [row] = await all<{ id: number }>(sql`
+    insert into public.agent_runs as r (kind, summary, events) values (${kind}, ${summary}, ${JSON.stringify(events)}::jsonb)
+    returning to_jsonb(r) as row`);
+  return row?.id ?? null;
 }
 
 /** Adds watch items not already on the list (case-insensitive). Returns only the new rows. */
