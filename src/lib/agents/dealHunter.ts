@@ -196,7 +196,7 @@ How to hunt:
 - Start with search_weekly_ads (it covers every store at once, scoped to each store's ZIP). Try 2-3 phrasings: the cut's common names, singular forms, and the core cut without qualifiers. Listings often combine items ("Baby Back Ribs or Boneless Pork Tenderloin").
 - For stores whose own ad can be pinned to our location (Publix), also browse_store_ad with a key word; it often has details and savings text Flipp lacks.
 - For stores marked "(use search_store_catalog)", search the store's own catalog too: it gives our store's everyday shelf price and any current sale/member deal, including items the weekly ad doesn't list. Everyday prices matter to the household as much as sales. When several pack sizes match, prefer the lowest per-lb price (often the family pack) and say which pack in the note. (Publix's catalog only shows items on promotion; a missing Publix price means "not on promotion", not "not sold".)
-- If a store has both a weekly-ad listing and a catalog listing for the cut, submit the one with the lower price you'd actually pay.
+- If a store has both a weekly-ad listing and a catalog listing for the cut, submit the one with the lower price you'd actually pay. If they're the same product at the same price, submit the catalog listing: it carries the regular price, so a sale is recognized as a sale.
 ${
   mode === "chat"
     ? "- For stores with nothing in the weekly ad, look on the store's own site: search_store_site, then read_product_page on the best single-product URL. For product_page evidence, fill `extracted` with exactly what the page says and copy the exact price text into `quote`. Never invent a number."

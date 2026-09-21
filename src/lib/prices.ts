@@ -86,6 +86,20 @@ function buildResult(store: Store, finding: Finding | undefined, verdict: Verdic
   if (!verdict || !evidence || verdict.verdict === "reject") {
     return { ...empty(store), note: verdict?.reason ?? finding?.note ?? "Not in this week's ad" };
   }
+  // A weekly ad often prints only the price. If the store's own catalog shows the same price with
+  // a regular price attached, use that listing so a sale reads as a sale.
+  if (evidence.source === "weekly_ad" && evidence.listing.original_price === null && !evidence.listing.sale_story) {
+    const twin = locker
+      .forStore(store.id)
+      .find(
+        (e) =>
+          e.source === "store_catalog" &&
+          e.listing.current_price === evidence.listing.current_price &&
+          e.listing.original_price !== null &&
+          e.listing.post_price_text === (evidence.listing.post_price_text ?? "").toLowerCase().replace(/^per\s+/, ""),
+      );
+    if (twin) return buildResult(store, { ...finding!, evidence_id: twin.id }, verdict, locker);
+  }
 
   if (evidence.source === "product_page") {
     const x = finding?.extracted;

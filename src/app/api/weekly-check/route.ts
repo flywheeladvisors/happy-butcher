@@ -20,7 +20,7 @@ export async function POST(request: Request) {
       phase === "finish"
         ? await finishWeeklyRun(Number(params.get("run")), { sendEmail: !dry })
         : await runWeeklyCheck({ sendEmail: !dry });
-    const hasNews = report.deals > 0 || report.lowest_everyday.length > 0;
+    const hasNews = report.best_offers.length > 0;
     const failed = hasNews && !dry && !report.emailed;
     return Response.json(report, { status: failed ? 502 : 200 });
   } catch (err) {

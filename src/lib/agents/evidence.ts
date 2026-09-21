@@ -38,6 +38,10 @@ export class EvidenceLocker {
   get(id: string | null | undefined): Evidence | undefined {
     return id ? this.items.get(id) : undefined;
   }
+
+  forStore(storeId: number): Evidence[] {
+    return [...this.items.values()].filter((e) => e.store_id === storeId);
+  }
 }
 
 export const listingText = (l: AdListing) =>
