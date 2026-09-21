@@ -15,7 +15,21 @@ Four agents, each with its own instructions, tools, and loop (`src/lib/agents/`)
 
 **Price check flow** (`prices.ts`): Butcher → Deal Hunter → Cut Inspector → (rejects with hints) → Deal Hunter → Cut Inspector. Prices are then parsed deterministically from the approved raw evidence (`priceParse.ts`), so no model re-types a number. Product-page prices are always `unverified`, since most chains pick the store by cookie.
 
-**Wednesday** (`weeklyCheck.ts`): the Butcher dispatches Deal Hunters for every watched cut (code backstops any he skips), reads the verified deals, and writes the intro and sign-off. The deals table in the email is rendered from the results.
+**Wednesday** (`weeklyCheck.ts`), in three steps so no single Vercel call has to price everything within its time limit: **start** (the Butcher dispatches Deal Hunters for every watched cut; code backstops any he skips; store ad pages are scraped once), **hunt** (one `/api/price-cut` call per cut, run by GitHub Actions 5 at a time, results saved under the run id), **finish** (the Butcher reads the run's verified results and writes the intro and sign-off). The email lists this week's sales plus each cut's **lowest everyday per-lb price**; the tables are rendered from the results.
+
+## Where prices come from
+
+Each store is read from its own site, pinned to our Cary location (`src/lib/storeCatalogs.ts`), plus weekly ads via Flipp (by ZIP) and Publix's store-set ad page:
+
+| Store | Source | Notes |
+|---|---|---|
+| Wegmans (West Cary, #139) | Wegmans' Algolia product search, `storeNumber:139` | Shelf + Shoppers Club prices |
+| Harris Teeter (Harrison Pointe, 09700112) | Search page data, store via `x-active-modality` cookie | Can stall from cloud IPs; falls back to Flipp |
+| LIDL (US01110, region 1110) | lidl.com search API, region price groups | Lidl Plus app prices ignored |
+| Lowes Foods (Cary Tryon, #162) | Inmar eRetail API; store selected per session and verified | |
+| Publix (Amberly Place, #1552) | publix.com search pages `?setstorenumber=1552` | Publix only publishes prices for promoted items |
+| ALDI (Maynard Rd; Instacart shop 516858) | aldi.us Instacart storefront GraphQL | Query hashes change with ALDI's site builds (`ALDI_SEARCH_HASH`, `ALDI_ITEMS_HASH`) |
+| Food Lion (Parkway Point, #624) | Flipp weekly ad only | Its price API is behind bot protection we don't work around |
 
 Models (via OpenRouter): Butcher `OPENROUTER_MODEL` (Claude Sonnet 5), Deal Hunter Claude Haiku 4.5 (many fast tool calls), Cut Inspector and Store Scout Claude Sonnet 5. Override with `HUNTER_MODEL`, `INSPECTOR_MODEL`, `SCOUT_MODEL`.
 
