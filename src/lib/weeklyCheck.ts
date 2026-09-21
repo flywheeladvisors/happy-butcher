@@ -20,7 +20,7 @@ export interface Deal extends PriceResult {
   item: string;
 }
 
-const CONCURRENCY = 4;
+const CONCURRENCY = 8;
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -60,7 +60,7 @@ export function renderEmail(deals: Deal[], everyday: EverydayBest[], words: { in
       "",
     ]),
     ...(everyday.length
-      ? ["LOWEST EVERYDAY PRICES (per lb, not on sale)", ...everyday.map((e) => `  ${e.item}: ${e.store} ${e.per_lb.toFixed(2)}/lb, ${e.product_name ?? ""}${e.compared > 1 ? ` (cheapest of ${e.compared} stores)` : ""}`), ""]
+      ? ["LOWEST EVERYDAY PRICES (per lb, not on sale)", ...everyday.map((e) => `  ${e.item}: ${e.store} $${e.per_lb.toFixed(2)}/lb, ${e.product_name ?? ""}${e.compared > 1 ? ` (cheapest of ${e.compared} stores)` : ""}`), ""]
       : []),
     words.signoff,
     appUrl ? `\nAsk the butcher: ${appUrl}` : "",
@@ -90,7 +90,7 @@ export function renderEmail(deals: Deal[], everyday: EverydayBest[], words: { in
       (e) => `<tr>
         <td style="padding:8px 8px 8px 0;font-size:13px;font-weight:600;vertical-align:top;border-bottom:1px solid #f0f0f0">${esc(e.item)}</td>
         <td style="padding:8px;font-size:13px;vertical-align:top;border-bottom:1px solid #f0f0f0">${esc(e.store)}<div style="color:#737373;font-size:12px">${e.product_url ? `<a href="${esc(e.product_url)}" style="color:#737373">${esc(e.product_name ?? "")}</a>` : esc(e.product_name ?? "")}</div></td>
-        <td style="padding:8px 0 8px 8px;font-size:13px;text-align:right;white-space:nowrap;vertical-align:top;border-bottom:1px solid #f0f0f0"><strong>${e.per_lb.toFixed(2)}/lb</strong>${e.compared > 1 ? `<div style="color:#a3a3a3;font-size:11px">best of ${e.compared}</div>` : ""}</td></tr>`,
+        <td style="padding:8px 0 8px 8px;font-size:13px;text-align:right;white-space:nowrap;vertical-align:top;border-bottom:1px solid #f0f0f0"><strong>$${e.per_lb.toFixed(2)}/lb</strong>${e.compared > 1 ? `<div style="color:#a3a3a3;font-size:11px">best of ${e.compared}</div>` : ""}</td></tr>`,
     )
     .join("");
 

@@ -107,7 +107,7 @@ const adTools: AgentTool<HunterCtx>[] = [
   {
     name: "search_store_catalog",
     description:
-      "Search a store's own product catalog, pinned to our store: shelf price plus any member/loyalty deal (e.g. Wegmans Shoppers Club). Works only for chains with a catalog (currently Wegmans); use it for them instead of the weekly ad, whose Flipp copy lacks their meat.",
+      "Search a store's own product catalog, pinned to our store: everyday shelf price plus any current sale/member deal. Available for stores marked '(use search_store_catalog)' in the store list. Call it for several stores in the same turn.",
     parameters: {
       type: "object",
       properties: { store_id: { type: "integer" }, query: { type: "string", description: "e.g. 'ground beef 80/20', 'chicken breast'" } },
@@ -195,7 +195,8 @@ const SYSTEM = (mode: "chat" | "weekly") => `You are the Deal Hunter on the Happ
 How to hunt:
 - Start with search_weekly_ads (it covers every store at once, scoped to each store's ZIP). Try 2-3 phrasings: the cut's common names, singular forms, and the core cut without qualifiers. Listings often combine items ("Baby Back Ribs or Boneless Pork Tenderloin").
 - For stores whose own ad can be pinned to our location (Publix), also browse_store_ad with a key word; it often has details and savings text Flipp lacks.
-- For stores with a store-pinned catalog (Wegmans), use search_store_catalog: it has every product's shelf price for our store plus member deals. When several pack sizes match, prefer the lowest per-lb price (often the family pack) and say which pack in the note.
+- For stores marked "(use search_store_catalog)", search the store's own catalog too: it gives our store's everyday shelf price and any current sale/member deal, including items the weekly ad doesn't list. Everyday prices matter to the household as much as sales. When several pack sizes match, prefer the lowest per-lb price (often the family pack) and say which pack in the note. (Publix's catalog only shows items on promotion; a missing Publix price means "not on promotion", not "not sold".)
+- If a store has both a weekly-ad listing and a catalog listing for the cut, submit the one with the lower price you'd actually pay.
 ${
   mode === "chat"
     ? "- For stores with nothing in the weekly ad, look on the store's own site: search_store_site, then read_product_page on the best single-product URL. For product_page evidence, fill `extracted` with exactly what the page says and copy the exact price text into `quote`. Never invent a number."
