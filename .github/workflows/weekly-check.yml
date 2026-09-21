@@ -1,0 +1,41 @@
+# Wednesday-morning alarm clock: calls the deployed /api/weekly-check, which prices every watched
+# cut at every store and emails only the sale items. The work runs in the Vercel function.
+#
+# GitHub cron is UTC. 12:00 UTC = 8am Eastern while on EDT (Mar-Nov).
+# DST reminder: when clocks fall back in November (EST), change to "0 13 * * 3" to stay at 8am;
+# switch back to "0 12 * * 3" in March.
+#
+# Repo secrets:
+#   WEEKLY_CHECK_URL  https://<app>/api/weekly-check
+#   CRON_SECRET       same value as in Vercel
+name: Wednesday meat deals
+
+on:
+  schedule:
+    - cron: "0 12 * * 3"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Check prices but don't send the email"
+        type: boolean
+        default: false
+
+jobs:
+  weekly-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Call /api/weekly-check
+        env:
+          WEEKLY_CHECK_URL: ${{ secrets.WEEKLY_CHECK_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          DRY: ${{ inputs.dry_run && '?dry=1' || '' }}
+        run: |
+          status=$(curl -sS -o response.json -w "%{http_code}" -X POST "$WEEKLY_CHECK_URL$DRY" \
+            -H "Authorization: Bearer $CRON_SECRET" --max-time 300) || status="curl-error"
+          jq . response.json 2>/dev/null || cat response.json
+          if [ "$status" != "200" ]; then
+            echo "::error::Weekly check failed with HTTP $status"
+            exit 1
+          fi
+          jq -r '"Checked \(.checks) item x store combos, \(.deals) deals, emailed: \(.emailed)"' response.json >> "$GITHUB_STEP_SUMMARY"
