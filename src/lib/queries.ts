@@ -95,6 +95,47 @@ export async function savePriceChecks(
   );
 }
 
+export interface HistoryPoint {
+  week: string; // ad-week start (a Wednesday), YYYY-MM-DD
+  store: string;
+  status: "found" | "unverified";
+  price: number; // what you'd pay: sale price when on sale, else regular
+  regular_price: number | null;
+  sale_price: number | null;
+  on_sale: boolean;
+  product_name: string | null;
+  unit_price: string | null;
+  promo_text: string | null;
+  product_url: string | null;
+  checked_at: string;
+}
+
+/**
+ * One point per store per ad week (Wed-Tue, matching the circulars): that week's latest priced
+ * check for the cut. BOGO listings with no printed price have nothing to plot and are left out.
+ */
+export async function cutHistory(item: WatchItem): Promise<HistoryPoint[]> {
+  return all<HistoryPoint>(sql`
+    select to_jsonb(x) as row from (
+      select distinct on (week, s.name)
+        to_char(date_trunc('week', (pc.checked_at at time zone 'America/New_York') - interval '2 days') + interval '2 days', 'YYYY-MM-DD') as week,
+        s.name as store, pc.status,
+        coalesce(pc.sale_price, pc.regular_price) as price,
+        pc.regular_price, pc.sale_price, pc.on_sale, pc.product_name, pc.unit_price, pc.promo_text, pc.product_url, pc.checked_at
+      from public.price_checks pc
+      join public.stores s on s.id = pc.store_id
+      where (pc.watch_item_id = ${item.id} or lower(pc.item_query) = lower(${item.name}))
+        and pc.status in ('found', 'unverified')
+        and coalesce(pc.sale_price, pc.regular_price) is not null
+      order by week, s.name, pc.checked_at desc) x
+    order by week, store`);
+}
+
+export async function getWatchItem(id: number): Promise<WatchItem | null> {
+  const [row] = await all<WatchItem>(sql`select to_jsonb(w) as row from public.watch_items w where w.id = ${id}`);
+  return row ?? null;
+}
+
 export interface DashboardStats {
   stores: number;
   watchItems: number;
