@@ -1,7 +1,9 @@
 import "server-only";
 import { z } from "zod";
+import { adPageSourceFor } from "../adPages";
 import { flippItemUrl, sameMerchant, searchFlipp } from "../flipp";
 import { getScrapedAd, scrapeCached } from "../scrapedAds";
+import { storeCatalogFor } from "../storeCatalogs";
 import { tavilySearch } from "../tavily";
 import type { Store } from "../types";
 import { EvidenceLocker, listingText } from "./evidence";
@@ -102,6 +104,40 @@ const adTools: AgentTool<HunterCtx>[] = [
       };
     },
   },
+  {
+    name: "search_store_catalog",
+    description:
+      "Search a store's own product catalog, pinned to our store: shelf price plus any member/loyalty deal (e.g. Wegmans Shoppers Club). Works only for chains with a catalog (currently Wegmans); use it for them instead of the weekly ad, whose Flipp copy lacks their meat.",
+    parameters: {
+      type: "object",
+      properties: { store_id: { type: "integer" }, query: { type: "string", description: "e.g. 'ground beef 80/20', 'chicken breast'" } },
+      required: ["store_id", "query"],
+    },
+    describe: (a) => `searched store ${a.store_id}'s own catalog for "${a.query}"`,
+    async run(args, ctx) {
+      const store = ctx.stores.find((s) => s.id === Number(args.store_id));
+      if (!store) return { error: "Unknown store_id" };
+      const catalog = storeCatalogFor(store.name);
+      if (!catalog) return { note: `${store.name} has no store-pinned catalog; use search_weekly_ads.` };
+      if (!store.store_number) return { note: `No store number saved for ${store.name}; can't pin the catalog to our store.` };
+      const hits = await catalog.search(store.store_number, String(args.query));
+      if (hits.length === 0) return { note: "No products matched." };
+      return {
+        store: storeLabel(store),
+        products: hits.map((h) => {
+          const e = ctx.locker.add({
+            store_id: store.id,
+            source: "store_catalog",
+            product_name: h.product_name,
+            listing: h,
+            url: h.url,
+            valid: h.valid_text,
+          });
+          return { evidence_id: e.id, product: h.product_name, price: listingText(h) };
+        }),
+      };
+    },
+  },
 ];
 
 const webTools: AgentTool<HunterCtx>[] = [
@@ -159,6 +195,7 @@ const SYSTEM = (mode: "chat" | "weekly") => `You are the Deal Hunter on the Happ
 How to hunt:
 - Start with search_weekly_ads (it covers every store at once, scoped to each store's ZIP). Try 2-3 phrasings: the cut's common names, singular forms, and the core cut without qualifiers. Listings often combine items ("Baby Back Ribs or Boneless Pork Tenderloin").
 - For stores whose own ad can be pinned to our location (Publix), also browse_store_ad with a key word; it often has details and savings text Flipp lacks.
+- For stores with a store-pinned catalog (Wegmans), use search_store_catalog: it has every product's shelf price for our store plus member deals. When several pack sizes match, prefer the lowest per-lb price (often the family pack) and say which pack in the note.
 ${
   mode === "chat"
     ? "- For stores with nothing in the weekly ad, look on the store's own site: search_store_site, then read_product_page on the best single-product URL. For product_page evidence, fill `extracted` with exactly what the page says and copy the exact price text into `quote`. Never invent a number."
@@ -253,7 +290,12 @@ export async function runDealHunter(
   trace: Trace,
   feedback: { store_id: number; hint: string }[] = [],
 ): Promise<Finding[]> {
-  const storeList = ctx.stores.map((s) => `- ${storeLabel(s)}${s.weekly_ad_url ? "" : " (no weekly ad)"}`).join("\n");
+  const storeList = ctx.stores
+    .map((s) => {
+      const how = storeCatalogFor(s.name) && s.store_number ? " (use search_store_catalog)" : adPageSourceFor(s.name) ? " (also browse_store_ad)" : "";
+      return `- ${storeLabel(s)}${how}`;
+    })
+    .join("\n");
   const retry = feedback.length
     ? `\n\nThe Cut Inspector sent these back. Look again for just these stores:\n${feedback.map((f) => `- store_id ${f.store_id}: ${f.hint}`).join("\n")}`
     : "";

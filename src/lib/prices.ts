@@ -94,7 +94,13 @@ function buildResult(store: Store, finding: Finding | undefined, verdict: Verdic
 
   const p = parseAdListing(evidence.listing);
   let { regular_price, sale_price, on_sale } = p;
-  const notes = [evidence.valid ? `Weekly ad, valid ${evidence.valid.replace(/^valid\s*/i, "")}` : "Weekly ad"];
+  const notes = [
+    evidence.source === "store_catalog"
+      ? `${store.name}'s own price for our store${evidence.valid ? ` (${evidence.valid})` : ""}`
+      : evidence.valid
+        ? `Weekly ad, valid ${evidence.valid.replace(/^valid\s*/i, "")}`
+        : "Weekly ad",
+  ];
   if (!on_sale && verdict.sale_from_history && evidence.listing.current_price !== null) {
     // Plain advertised price the Inspector judged a deal against this store's own price history.
     on_sale = true;

@@ -140,7 +140,7 @@ export async function runCutInspector(ctx: InspectorCtx, findings: Finding[], tr
       ? "no evidence"
       : e.source === "product_page"
         ? `product page ${e.url}; Hunter read: ${JSON.stringify(f.extracted)}`
-        : `${e.source === "weekly_ad" ? "weekly ad" : "store's own ad page"}: "${e.product_name}" | ${listingText(e.listing)}`;
+        : `${{ weekly_ad: "weekly ad", store_ad_page: "store's own ad page", store_catalog: "store's own catalog, pinned to our store" }[e.source]}: "${e.product_name}" | ${listingText(e.listing)}`;
     const where = store ? `${store.name}, our store at ${store.address ?? `${store.city}, ${store.state} ${store.zip ?? ""}`}` : "unknown store";
     return `- store_id ${f.store_id} (${where}): evidence ${f.evidence_id ?? "none"}: ${shown}. Hunter's note: ${f.note}`;
   });

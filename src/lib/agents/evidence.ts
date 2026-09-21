@@ -9,7 +9,7 @@ export type Evidence =
   | {
       id: string;
       store_id: number;
-      source: "weekly_ad" | "store_ad_page";
+      source: "weekly_ad" | "store_ad_page" | "store_catalog";
       product_name: string;
       listing: AdListing;
       url: string;
