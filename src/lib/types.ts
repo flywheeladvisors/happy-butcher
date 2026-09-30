@@ -30,6 +30,9 @@ export interface PriceResult {
   regular_price: number | null;
   sale_price: number | null;
   unit_price: string | null;
+  /** Comparable price per pound, from a unit price or a package weight; null if no weight is published. */
+  per_lb_price: number | null;
+  per_lb_source: "unit" | "derived" | null;
   on_sale: boolean;
   promo_text: string | null;
   product_url: string | null;

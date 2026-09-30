@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import type { AgentName } from "@/lib/agents/runtime";
+import { groupCuts } from "@/lib/cutGroup";
 import type { Store, WatchItem } from "@/lib/types";
 
 export const AGENTS: { name: AgentName; tone: string; role: string }[] = [
@@ -12,21 +13,10 @@ export const AGENTS: { name: AgentName; tone: string; role: string }[] = [
 ];
 export const agentTone = (name: AgentName) => AGENTS.find((a) => a.name === name)?.tone ?? "bg-neutral-400";
 
-export function cutGroup(name: string): "Beef" | "Chicken" | "Pork" | "Other" {
-  const n = name.toLowerCase();
-  if (/chicken|thigh|breast|wing|drumstick/.test(n)) return "Chicken";
-  if (/pork|picnic|ham|bacon|chop/.test(n)) return "Pork";
-  if (/beef|steak|ribeye|strip|broil|filet|sirloin|brisket|chuck|ground/.test(n)) return "Beef";
-  return "Other";
-}
 
 export const GROUP_TONE = { Beef: "bg-red-500", Chicken: "bg-amber-500", Pork: "bg-pink-400", Other: "bg-neutral-400" } as const;
 
-export function cutGroups(items: WatchItem[]) {
-  return (["Beef", "Chicken", "Pork", "Other"] as const)
-    .map((g) => ({ group: g, items: items.filter((w) => cutGroup(w.name) === g) }))
-    .filter((g) => g.items.length > 0);
-}
+export const cutGroups = (items: WatchItem[]) => groupCuts(items, (w) => w.name);
 
 export function nextWednesday(): string {
   const d = new Date();

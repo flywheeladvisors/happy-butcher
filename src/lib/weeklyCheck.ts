@@ -10,6 +10,7 @@ import { appendAgentRun, createAgentRun, listStores, listWatchItems, runResults 
 import { getScrapedAd } from "./scrapedAds";
 import type { PriceResult, Store, WatchItem } from "./types";
 import { bestOffers, type CutOffers, type Offer } from "./everyday";
+import { groupCuts } from "./cutGroup";
 
 // The Wednesday check: email rendering here; orchestration (start / hunt / finish) below.
 // Prices in the email come straight from saved results; the Butcher only writes the intro and
@@ -44,25 +45,45 @@ function priceLine(d: Deal): string {
   return d.promo_text ?? "On sale";
 }
 
-/** "$4.99/lb" or "$9.99 ea", plus "was $7.99" for sales. */
-function offerPrice(o: Offer, perLb: boolean): string {
-  const now = money(o.price) ?? o.promo_text ?? "On sale";
-  const unit = perLb ? "/lb" : o.unit_price && /ea/i.test(o.unit_price) ? " ea" : "";
-  const was = o.on_sale && o.regular_price !== null && o.regular_price > o.price ? ` (was ${money(o.regular_price)}${o.note?.includes("estimated") ? " approx." : ""})` : "";
-  return `${now}${unit}${was}`;
+/**
+ * Always per pound when we have it: "$4.99/lb", or "≈$6.48/lb" when worked out from a package
+ * weight, with the package price alongside. Falls back to the package price when no weight exists.
+ */
+function offerPrice(o: Offer): string {
+  const pkg = money(o.price);
+  if (o.per_lb === null) return `${pkg ?? o.promo_text ?? "On sale"}${pkg && o.unit_price && /ea/i.test(o.unit_price) ? " ea" : ""} (package)`;
+  const approx = o.per_lb_source === "derived" ? "≈" : "";
+  const perLbIsThePrice = o.per_lb === o.price && o.per_lb_source === "unit";
+  return `${approx}$${o.per_lb.toFixed(2)}/lb${perLbIsThePrice || !pkg ? "" : ` (${pkg} pkg)`}`;
+}
+
+/** "was $7.99/lb" for sales, where we can state it per pound. */
+function offerWas(o: Offer): string {
+  if (!o.on_sale || o.regular_price === null || o.regular_price <= o.price) return "";
+  const approx = o.note?.includes("estimated") ? " approx." : "";
+  if (o.per_lb === null || o.price === 0) return ` — was ${money(o.regular_price)}${approx}`;
+  const wasPerLb = Math.round((o.regular_price / o.price) * o.per_lb * 100) / 100;
+  return ` — was ${money(wasPerLb)}/lb${approx}`;
 }
 
 const tag = (o: Offer) => (o.on_sale ? "SALE" : "Everyday");
 
 export function renderEmail(cuts: CutOffers[], words: { intro: string; signoff: string }, appUrl: string | null) {
+  // Beef, then Chicken, then Pork (then anything else).
+  const groups = groupCuts(cuts, (c) => c.item);
+
   const text = [
     words.intro,
     "",
-    ...cuts.flatMap((c) => [
-      c.item.toUpperCase() + (c.compared > 1 ? ` (best of ${c.compared} stores, per lb)` : ""),
-      ...c.ranked.map((o, i) => `  ${i + 1}. ${o.store}: ${offerPrice(o, true)} [${tag(o)}] ${o.product_name ?? ""}${o.on_sale && o.promo_text ? ` — ${o.promo_text}` : ""}`),
-      ...c.package_sales.map((o) => `  + ${o.store} (package): ${offerPrice(o, false)} [SALE] ${o.product_name ?? ""}${o.promo_text ? ` — ${o.promo_text}` : ""}`),
+    ...groups.flatMap(({ group, items }) => [
+      `== ${group.toUpperCase()} ==`,
       "",
+      ...items.flatMap((c) => [
+        c.item.toUpperCase() + (c.compared > 1 ? ` (best of ${c.compared} stores)` : ""),
+        ...c.ranked.map((o, i) => `  ${i + 1}. ${o.store}: ${offerPrice(o)}${offerWas(o)} [${tag(o)}] ${o.product_name ?? ""}${o.on_sale && o.promo_text ? ` — ${o.promo_text}` : ""}`),
+        ...c.package_sales.map((o) => `  + ${o.store}: ${offerPrice(o)}${offerWas(o)} [SALE, no weight given] ${o.product_name ?? ""}${o.promo_text ? ` — ${o.promo_text}` : ""}`),
+        "",
+      ]),
     ]),
     words.signoff,
     appUrl ? `\nAsk the butcher: ${appUrl}` : "",
@@ -72,20 +93,28 @@ export function renderEmail(cuts: CutOffers[], words: { intro: string; signoff: 
     o.on_sale
       ? `<span style="display:inline-block;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:0 5px;font-size:10px;font-weight:600;margin-left:6px">SALE</span>`
       : `<span style="display:inline-block;background:#f5f5f5;color:#737373;border-radius:4px;padding:0 5px;font-size:10px;margin-left:6px">EVERYDAY</span>`;
-  const row = (o: Offer, label: string, perLb: boolean, best: boolean) => `<tr>
+  const row = (o: Offer, label: string, best: boolean) => `<tr>
       <td style="padding:7px 8px 7px 0;font-size:12px;color:#a3a3a3;vertical-align:top;width:18px">${label}</td>
       <td style="padding:7px 8px 7px 0;font-size:13px;vertical-align:top;white-space:nowrap;${best ? "font-weight:600" : "color:#404040"}">${esc(o.store)}${badge(o)}</td>
       <td style="padding:7px 8px;font-size:12px;color:#525252;vertical-align:top">${o.product_url ? `<a href="${esc(o.product_url)}" style="color:#525252">${esc(o.product_name ?? "")}</a>` : esc(o.product_name ?? "")}${
         o.on_sale && o.promo_text ? `<div style="color:#b91c1c;font-size:11px;margin-top:2px">${esc(o.promo_text)}</div>` : ""
       }</td>
-      <td style="padding:7px 0 7px 8px;font-size:13px;text-align:right;white-space:nowrap;vertical-align:top;${best ? "font-weight:700" : ""}">${esc(offerPrice(o, perLb))}</td></tr>`;
+      <td style="padding:7px 0 7px 8px;font-size:13px;text-align:right;white-space:nowrap;vertical-align:top;${best ? "font-weight:700" : ""}">${esc(offerPrice(o))}${
+        offerWas(o) ? `<div style="color:#b91c1c;font-size:11px;font-weight:400">${esc(offerWas(o).replace(/^ — /, ""))}</div>` : ""
+      }</td></tr>`;
 
-  const sections = cuts
+  const sections = groups
     .map(
-      (c) => `<tr><td colspan="4" style="padding:16px 0 4px;border-bottom:1px solid #e5e5e5">
-        <span style="font-weight:600;font-size:14px">${esc(c.item)}</span>${c.compared > 1 ? `<span style="color:#a3a3a3;font-size:11px;margin-left:6px">best of ${c.compared} stores, per lb</span>` : ""}</td></tr>
-      ${c.ranked.map((o, i) => row(o, String(i + 1), true, i === 0 || o.price === c.ranked[0].price)).join("")}
-      ${c.package_sales.map((o) => row(o, "+", false, false)).join("")}`,
+      ({ group, items }) => `<tr><td colspan="4" style="padding:22px 0 2px">
+        <span style="display:inline-block;background:#171717;color:#fff;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600;letter-spacing:0.04em">${esc(group.toUpperCase())}</span></td></tr>
+      ${items
+        .map(
+          (c) => `<tr><td colspan="4" style="padding:14px 0 4px;border-bottom:1px solid #e5e5e5">
+        <span style="font-weight:600;font-size:14px">${esc(c.item)}</span>${c.compared > 1 ? `<span style="color:#a3a3a3;font-size:11px;margin-left:6px">best of ${c.compared} stores</span>` : ""}</td></tr>
+      ${c.ranked.map((o, i) => row(o, String(i + 1), i === 0 || o.per_lb === c.ranked[0].per_lb)).join("")}
+      ${c.package_sales.map((o) => row(o, "+", false)).join("")}`,
+        )
+        .join("")}`,
     )
     .join("");
 
@@ -97,7 +126,7 @@ export function renderEmail(cuts: CutOffers[], words: { intro: string; signoff: 
     <table style="width:100%;border-collapse:collapse">${sections}</table>
     <p style="font-size:14px;color:#404040;margin:20px 0 0">${esc(words.signoff)}</p>
     ${appUrl ? `<p style="margin:18px 0 0"><a href="${esc(appUrl)}" style="display:inline-block;background:#171717;color:#fff;text-decoration:none;border-radius:8px;padding:8px 14px;font-size:13px">Ask the butcher</a></p>` : ""}
-    <p style="font-size:11px;color:#a3a3a3;margin:20px 0 0">Ranked by the per-lb price you'd pay this week, sale or everyday, at your Cary stores. "+" rows are sales priced per package, which can't be compared per lb. "Approx." regular prices come from "save up to" wording in an ad.</p>
+    <p style="font-size:11px;color:#a3a3a3;margin:20px 0 0">Ranked by the price per pound you'd pay this week, sale or everyday, at your Cary stores. "≈" means the per-lb price was worked out from the package weight. "+" rows are sales whose listing gives no weight, so they can't be compared per lb. "Approx." regular prices come from "save up to" wording in an ad.</p>
   </div></div>`;
 
   return { text, html };
@@ -186,8 +215,8 @@ async function butcherRundown(cuts: CutOffers[], trace: Trace): Promise<Words> {
     .map((c) =>
       [
         `${c.item}:`,
-        ...c.ranked.map((o, i) => `  ${i + 1}. ${o.store} ${offerPrice(o, true)} ${tag(o)} ${o.product_name ?? ""}`),
-        ...c.package_sales.map((o) => `  + ${o.store} ${offerPrice(o, false)} SALE (package) ${o.product_name ?? ""}`),
+        ...c.ranked.map((o, i) => `  ${i + 1}. ${o.store} ${offerPrice(o)} ${tag(o)} ${o.product_name ?? ""}`),
+        ...c.package_sales.map((o) => `  + ${o.store} ${offerPrice(o)} SALE (no weight given) ${o.product_name ?? ""}`),
       ].join("\n"),
     )
     .join("\n");

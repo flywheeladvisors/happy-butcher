@@ -76,6 +76,7 @@ async function searchWegmans(storeNumber: string, query: string): Promise<Catalo
       original_price: onDeal ? shelf.price : null,
       pre_price_text: null,
       post_price_text: shelf.unit,
+      unit_hint: (onDeal ? h.price_inStoreLoyalty?.unitPrice : h.price_inStore?.unitPrice) ?? null,
       sale_story: onDeal
         ? `Shoppers Club price${discount?.savings ? `: $${discount.savings.toFixed(2)} off per pack` : ""}${ends ? ` through ${ends}` : ""}`
         : null,
@@ -250,6 +251,7 @@ async function searchLidl(region: string, query: string): Promise<CatalogListing
       original_price: onDeal ? was : null,
       pre_price_text: null,
       post_price_text: perLb ? "lb" : "ea",
+      unit_hint: cp.basePrice?.text ?? null,
       sale_story: onDeal ? `${cp.discount?.discountText ?? "Sale"}${ends ? ` through ${ends}` : ""}` : null,
       valid_text: onDeal && ends ? `Sale through ${ends}` : "Everyday shelf price",
     });
@@ -272,6 +274,8 @@ interface LowesProduct {
   name?: string;
   chargePrice?: number;
   chargeByUOM?: string;
+  unitPrice?: number;
+  unitPriceUOM?: string;
   isAvailableForLocation?: boolean;
   hasDigitalCoupon?: boolean;
   promotion?: { originalChargePrice?: number; saleEndDate?: string; label?: { text?: string } };
@@ -339,6 +343,7 @@ async function searchLowesFoods(storeNumber: string, query: string): Promise<Cat
       original_price: onDeal ? was : null,
       pre_price_text: null,
       post_price_text: byLb ? "lb" : "ea",
+      unit_hint: p.unitPrice !== undefined && p.unitPriceUOM ? `$${(p.unitPrice / 100).toFixed(2)}/${p.unitPriceUOM.toLowerCase()}` : null,
       sale_story: onDeal
         ? `${p.promotion?.label?.text ?? "Sale"}${ends ? ` through ${ends}` : ""}`
         : p.hasDigitalCoupon
@@ -524,6 +529,7 @@ async function searchAldi(shopId: string, query: string): Promise<CatalogListing
       original_price: was,
       pre_price_text: null,
       post_price_text: byLb ? "lb" : "ea",
+      unit_hint: (findKey(x.price, "pricingUnitString") as string | undefined) ?? null,
       sale_story: was ? `Price drop${offer ? ` (${offer})` : ""}` : null,
       valid_text: was ? "Price drop (end date not published)" : "Everyday shelf price",
     });

@@ -74,3 +74,10 @@ create table if not exists public.agent_runs (
 
 -- Which Wednesday run a check belongs to (the run is split into start / per-cut / finish calls).
 alter table public.price_checks add column if not exists run_id bigint references public.agent_runs (id) on delete set null;
+
+insert into public.watch_items (name) values ('Chuck roast') on conflict do nothing;
+
+-- Comparable per-lb price: from a per-lb unit price, a per-oz unit price, or a weight in the
+-- product name ('derived'). Null when no weight is published anywhere.
+alter table public.price_checks add column if not exists per_lb_price numeric(10,2);
+alter table public.price_checks add column if not exists per_lb_source text check (per_lb_source in ('unit', 'derived'));

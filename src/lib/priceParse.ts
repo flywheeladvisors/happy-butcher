@@ -9,6 +9,8 @@
 //   "2.49 PER LB" and nothing else          -> advertised price, not flagged as a sale
 
 export interface AdListing {
+  /** A unit price the listing prints, e.g. "$0.41 per oz." — used to work out a per-lb price. */
+  unit_hint?: string | null;
   current_price: number | null;
   original_price: number | null;
   pre_price_text: string | null;

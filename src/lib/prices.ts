@@ -3,6 +3,7 @@ import { runCutInspector, type Verdict } from "./agents/cutInspector";
 import { runDealHunter, type Finding } from "./agents/dealHunter";
 import { EvidenceLocker } from "./agents/evidence";
 import type { Trace } from "./agents/runtime";
+import { perPound } from "./perPound";
 import { parseAdListing } from "./priceParse";
 import { listStores, savePriceChecks } from "./queries";
 import type { PriceResult, Store } from "./types";
@@ -74,11 +75,24 @@ function empty(store: Store): PriceResult {
     regular_price: null,
     sale_price: null,
     unit_price: null,
+    per_lb_price: null,
+    per_lb_source: null,
     on_sale: false,
     promo_text: null,
     product_url: store.weekly_ad_url,
     note: null,
   };
+}
+
+/** Fills in the comparable per-pound price (from a unit price, else a weight in the name). */
+function withPerPound(result: PriceResult, unitHint?: string | null): PriceResult {
+  const per = perPound({
+    price: result.on_sale ? result.sale_price : result.regular_price,
+    unit_price: result.unit_price ?? unitHint,
+    product_name: result.product_name,
+    pack_text: unitHint,
+  });
+  return { ...result, per_lb_price: per?.price ?? null, per_lb_source: per?.source ?? null };
 }
 
 function buildResult(store: Store, finding: Finding | undefined, verdict: Verdict | undefined, locker: EvidenceLocker): PriceResult {
@@ -105,7 +119,7 @@ function buildResult(store: Store, finding: Finding | undefined, verdict: Verdic
     const x = finding?.extracted;
     if (!x || x.current_price === null) return { ...empty(store), status: "unverified", product_url: evidence.url, note: verdict.reason };
     const p = parseAdListing({ current_price: x.current_price, original_price: x.original_price, pre_price_text: null, post_price_text: x.unit_text, sale_story: x.promo_text });
-    return {
+    return withPerPound({
       ...empty(store),
       // Product pages aren't pinned to our store, so they never count as verified.
       status: "unverified",
@@ -117,7 +131,7 @@ function buildResult(store: Store, finding: Finding | undefined, verdict: Verdic
       promo_text: p.promo_text,
       product_url: evidence.url,
       note: `Not in this week's ad; online price, not confirmed for the ${store.city} store. ${verdict.reason}`,
-    };
+    });
   }
 
   const p = parseAdListing(evidence.listing);
@@ -139,16 +153,19 @@ function buildResult(store: Store, finding: Finding | undefined, verdict: Verdic
   if (p.regular_is_estimate) notes.push("regular price estimated from the ad's \"save up to/at least\" wording");
   if (on_sale && regular_price === null) notes.push("regular price not printed in the ad");
 
-  return {
-    ...empty(store),
-    status: verdict.verdict === "approve" ? "found" : "unverified",
-    product_name: evidence.product_name,
-    regular_price,
-    sale_price,
-    unit_price: p.unit_price,
-    on_sale,
-    promo_text: p.promo_text,
-    product_url: evidence.url,
-    note: verdict.verdict === "approve" ? notes.join("; ") : `${verdict.reason}`,
-  };
+  return withPerPound(
+    {
+      ...empty(store),
+      status: verdict.verdict === "approve" ? "found" : "unverified",
+      product_name: evidence.product_name,
+      regular_price,
+      sale_price,
+      unit_price: p.unit_price,
+      on_sale,
+      promo_text: p.promo_text,
+      product_url: evidence.url,
+      note: verdict.verdict === "approve" ? notes.join("; ") : `${verdict.reason}`,
+    },
+    evidence.listing.unit_hint,
+  );
 }

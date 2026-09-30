@@ -90,6 +90,8 @@ export async function savePriceChecks(
       promo_text: r.promo_text,
       product_url: r.product_url,
       note: r.note,
+      per_lb_price: r.per_lb_price,
+      per_lb_source: r.per_lb_source,
       source: meta.source,
       run_id: meta.runId ?? null,
     })),
@@ -101,7 +103,7 @@ export async function runResults(runId: number): Promise<(PriceResult & { item: 
   return all<PriceResult & { item: string }>(sql`
     select to_jsonb(x) as row from (
       select pc.item_query as item, pc.store_id, s.name as store, pc.status, pc.product_name, pc.regular_price, pc.sale_price,
-             pc.unit_price, pc.on_sale, pc.promo_text, pc.product_url, pc.note
+             pc.unit_price, pc.per_lb_price, pc.per_lb_source, pc.on_sale, pc.promo_text, pc.product_url, pc.note
       from public.price_checks pc join public.stores s on s.id = pc.store_id
       where pc.run_id = ${runId}
       order by pc.item_query, s.name) x`);
