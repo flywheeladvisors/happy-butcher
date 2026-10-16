@@ -43,3 +43,6 @@ next-env.d.ts
 
 # leftovers from Dropbox build-lock workaround
 *-stale*
+
+# scratch scripts
+scripts/.*.tmp.*
