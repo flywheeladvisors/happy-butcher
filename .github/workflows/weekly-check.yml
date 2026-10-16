@@ -70,4 +70,4 @@ jobs:
             -H "Authorization: Bearer $CRON_SECRET" --max-time 300) || status="curl-error"
           jq 'del(.deal_list, .best_offers)' response.json 2>/dev/null || cat response.json
           if [ "$status" != "200" ]; then echo "::error::Finish failed with HTTP $status"; exit 1; fi
-          jq -r '"Run \(.run_id): \(.checks) item x store checks, best prices for \(.best_offers | length) cuts, \(.deals) on sale, emailed: \(.emailed)"' response.json >> "$GITHUB_STEP_SUMMARY"
+          jq -r '"Run \(.run_id): \(.checks) item x store checks, best prices for \(.best_offers | length) cuts, \(.deals) on sale, emailed: \(.emailed), cost: $\(.cost_usd)"' response.json >> "$GITHUB_STEP_SUMMARY"

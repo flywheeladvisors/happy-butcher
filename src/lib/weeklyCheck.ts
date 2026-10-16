@@ -6,7 +6,7 @@ import { run, sql } from "./db";
 import { requireEnv } from "./env";
 import { HAPPY_BUTCHER_SYSTEM } from "./persona";
 import { getItemPrices } from "./prices";
-import { appendAgentRun, createAgentRun, listStores, listWatchItems, runResults } from "./queries";
+import { appendAgentRun, createAgentRun, listStores, listWatchItems, runCost, runResults } from "./queries";
 import { getScrapedAd } from "./scrapedAds";
 import type { PriceResult, Store, WatchItem } from "./types";
 import { bestOffers, type CutOffers, type Offer } from "./everyday";
@@ -252,6 +252,8 @@ export interface WeeklyReport {
   emailed: boolean;
   email_error: string | null;
   run_id: number | null;
+  /** What the whole run cost in OpenRouter credits. */
+  cost_usd: number;
   deal_list: { item: string; store: string; product: string | null; price: string }[];
   /** Per cut: the best-priced offers, sale or everyday. */
   best_offers: CutOffers[];
@@ -269,6 +271,7 @@ async function deliver(all: Deal[], trace: Trace, runId: number | null, sendEmai
     emailed: false,
     email_error: null,
     run_id: runId,
+    cost_usd: 0,
     deal_list: deals.map((d) => ({ item: d.item, store: d.store, product: d.product_name, price: priceLine(d) })),
     best_offers: cuts,
   };
@@ -314,17 +317,18 @@ export async function startWeeklyRun(): Promise<{ run_id: number; cuts: { id: nu
   const runId = await createAgentRun("weekly", "Wednesday check (in progress)");
   const trace = new Trace();
   const [cuts] = await Promise.all([butcherDispatch(items, stores, trace), prewarmAdPages(stores)]);
-  await appendAgentRun(runId, trace.events);
+  await appendAgentRun(runId, trace.events, undefined, trace.totalCost);
   return { run_id: runId, cuts: cuts.map((w) => ({ id: w.id, name: w.name })) };
 }
 
 // --- Step 2: one cut (called per cut by /api/price-cut) ---------------------------------------
-export async function huntCut(runId: number | null, item: WatchItem): Promise<PriceResult[]> {
+export async function huntCut(runId: number | null, item: WatchItem): Promise<{ results: PriceResult[]; cost: number }> {
   const trace = new Trace();
   try {
-    return await getItemPrices(item.name, { source: "weekly", watchItemId: item.id, trace, runId });
+    const results = await getItemPrices(item.name, { source: "weekly", watchItemId: item.id, trace, runId });
+    return { results, cost: trace.totalCost };
   } finally {
-    if (runId) await appendAgentRun(runId, trace.events).catch(() => undefined);
+    if (runId) await appendAgentRun(runId, trace.events, undefined, trace.totalCost).catch(() => undefined);
   }
 }
 
@@ -333,7 +337,8 @@ export async function finishWeeklyRun(runId: number, options: { sendEmail?: bool
   const trace = new Trace();
   const all = await runResults(runId);
   const report = await deliver(all, trace, runId, options.sendEmail !== false);
-  await appendAgentRun(runId, trace.events, `best prices for ${report.best_offers.length} cuts (${report.deals} sales) from ${report.checks} checks`);
+  await appendAgentRun(runId, trace.events, `best prices for ${report.best_offers.length} cuts (${report.deals} sales) from ${report.checks} checks`, trace.totalCost);
+  report.cost_usd = await runCost(runId).catch(() => 0);
   return report;
 }
 

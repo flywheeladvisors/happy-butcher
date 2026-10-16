@@ -31,7 +31,7 @@ export async function chatCompletion(input: {
   temperature?: number;
   model?: string;
   timeoutMs?: number;
-}): Promise<{ content: string | null; toolCalls: ToolCall[] }> {
+}): Promise<{ content: string | null; toolCalls: ToolCall[]; cost: number; model: string }> {
   const res = await fetch(OPENROUTER_URL, {
     method: "POST",
     headers: {
@@ -44,6 +44,8 @@ export async function chatCompletion(input: {
       temperature: input.temperature ?? 0.7,
       max_tokens: input.maxTokens,
       messages: input.messages,
+      // Ask OpenRouter to report what the call cost, so a run can total up its own spend.
+      usage: { include: true },
       ...(input.tools?.length ? { tools: input.tools, tool_choice: input.toolChoice ?? "auto" } : {}),
     }),
     signal: AbortSignal.timeout(input.timeoutMs ?? 60_000),
@@ -56,7 +58,12 @@ export async function chatCompletion(input: {
   const data = await res.json();
   const message = data?.choices?.[0]?.message;
   if (!message) throw new Error(`OpenRouter returned no message: ${JSON.stringify(data).slice(0, 500)}`);
-  return { content: message.content ?? null, toolCalls: message.tool_calls ?? [] };
+  return {
+    content: message.content ?? null,
+    toolCalls: message.tool_calls ?? [],
+    cost: Number(data?.usage?.cost ?? 0) || 0,
+    model: String(data?.model ?? input.model ?? ""),
+  };
 }
 
 /** Pull the JSON object out of a model reply, tolerating code fences or stray prose. */

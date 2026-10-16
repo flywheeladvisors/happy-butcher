@@ -19,11 +19,12 @@ export async function POST(request: Request) {
   if (!item) return Response.json({ error: "Unknown watch item" }, { status: 404 });
 
   try {
-    const results = await huntCut(parsed.data.runId ?? null, item);
+    const { results, cost } = await huntCut(parsed.data.runId ?? null, item);
     return Response.json({
       cut: item.name,
       found: results.filter((r) => r.status === "found").length,
       on_sale: results.filter((r) => r.on_sale).length,
+      cost_usd: Number(cost.toFixed(4)),
     });
   } catch (err) {
     return Response.json({ cut: item.name, error: err instanceof Error ? err.message : String(err) }, { status: 500 });

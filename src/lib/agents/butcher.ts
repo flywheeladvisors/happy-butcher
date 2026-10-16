@@ -21,6 +21,7 @@ export async function runButcherChat(
 
   for (let round = 0; round < MAX_TOOL_ROUNDS && reply === null; round++) {
     const res = await chatCompletion({ messages, tools: TOOL_DEFINITIONS, maxTokens: 2000 });
+    trace.spend("Happy Butcher", res.cost);
     if (res.content?.trim()) spoken.push(res.content.trim());
     if (res.toolCalls.length === 0) {
       reply = spoken.join("\n\n") || "Well, I'll be, I lost my train of thought. Ask me that again?";
@@ -46,6 +47,6 @@ export async function runButcherChat(
 
   reply ??= [...spoken, "Whew, that's a lot of chopping for one question. Let's try it again, a bit simpler?"].join("\n\n");
   const lastQuestion = history.findLast((m) => m.role === "user")?.content ?? "";
-  const runId = trace.events.length ? await saveAgentRun("chat", lastQuestion.slice(0, 200), trace.events).catch(() => null) : null;
+  const runId = trace.events.length ? await saveAgentRun("chat", lastQuestion.slice(0, 200), trace.events, trace.totalCost).catch(() => null) : null;
   return { reply, trace: trace.events, runId };
 }

@@ -34,9 +34,10 @@ export async function findSavedStore(name: string, city: string, state: string):
 }
 
 /** Persists one agent trace (chat reply, Store Scout run, or Wednesday check). */
-export async function saveAgentRun(kind: "chat" | "weekly" | "store", summary: string, events: unknown[]): Promise<number | null> {
+export async function saveAgentRun(kind: "chat" | "weekly" | "store", summary: string, events: unknown[], costUsd = 0): Promise<number | null> {
   const [row] = await all<{ id: number }>(sql`
-    insert into public.agent_runs as r (kind, summary, events) values (${kind}, ${summary}, ${JSON.stringify(events)}::jsonb)
+    insert into public.agent_runs as r (kind, summary, events, cost_usd)
+    values (${kind}, ${summary}, ${JSON.stringify(events)}::jsonb, ${costUsd})
     returning to_jsonb(r) as row`);
   return row?.id ?? null;
 }
@@ -116,10 +117,19 @@ export async function createAgentRun(kind: "chat" | "weekly" | "store", summary:
 }
 
 /** Appends trace events to a run (the per-cut calls and the finish step each add theirs). */
-export async function appendAgentRun(runId: number, events: unknown[], summary?: string): Promise<void> {
+export async function appendAgentRun(runId: number, events: unknown[], summary?: string, costUsd = 0): Promise<void> {
   await run(sql`
-    update public.agent_runs set events = events || ${JSON.stringify(events)}::jsonb, summary = coalesce(${summary ?? null}, summary)
+    update public.agent_runs
+    set events = events || ${JSON.stringify(events)}::jsonb,
+        summary = coalesce(${summary ?? null}, summary),
+        cost_usd = cost_usd + ${costUsd}
     where id = ${runId}`);
+}
+
+/** What a run cost in OpenRouter credits (the per-cut calls each add their share). */
+export async function runCost(runId: number): Promise<number> {
+  const [row] = await all<{ cost_usd: number }>(sql`select to_jsonb(r) as row from public.agent_runs r where r.id = ${runId}`);
+  return Number(row?.cost_usd ?? 0);
 }
 
 export interface HistoryPoint {

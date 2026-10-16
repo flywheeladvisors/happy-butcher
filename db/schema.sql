@@ -81,3 +81,6 @@ insert into public.watch_items (name) values ('Chuck roast') on conflict do noth
 -- product name ('derived'). Null when no weight is published anywhere.
 alter table public.price_checks add column if not exists per_lb_price numeric(10,2);
 alter table public.price_checks add column if not exists per_lb_source text check (per_lb_source in ('unit', 'derived'));
+
+-- What each agent run cost in OpenRouter credits (OpenRouter reports per-call cost).
+alter table public.agent_runs add column if not exists cost_usd numeric(10,4) not null default 0;

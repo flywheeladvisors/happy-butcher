@@ -17,8 +17,25 @@ export interface TraceEvent {
 
 export class Trace {
   readonly events: TraceEvent[] = [];
+  /** What this piece of work cost in OpenRouter credits, per agent. */
+  readonly cost = new Map<AgentName, number>();
+
   add(agent: AgentName, kind: TraceEvent["kind"], summary: string) {
     this.events.push({ at: new Date().toISOString(), agent, kind, summary: summary.slice(0, 300) });
+  }
+
+  spend(agent: AgentName, usd: number) {
+    if (usd > 0) this.cost.set(agent, (this.cost.get(agent) ?? 0) + usd);
+  }
+
+  get totalCost(): number {
+    return [...this.cost.values()].reduce((a, b) => a + b, 0);
+  }
+
+  /** e.g. "$0.0412 (Deal Hunter $0.0102, Cut Inspector $0.0310)" */
+  costSummary(): string {
+    const parts = [...this.cost].sort((a, b) => b[1] - a[1]).map(([agent, usd]) => `${agent} $${usd.toFixed(4)}`);
+    return `$${this.totalCost.toFixed(4)}${parts.length > 1 ? ` (${parts.join(", ")})` : ""}`;
   }
 }
 
@@ -69,6 +86,7 @@ export async function runAgent<Ctx, Out>(spec: AgentSpec<Ctx, Out>, input: strin
       // On the last round the agent must hand in what it has.
       toolChoice: lastRound ? { type: "function", function: { name: spec.submit.name } } : "auto",
     });
+    trace.spend(spec.name, reply.cost);
 
     const calls = reply.toolCalls;
     if (calls.length === 0) {
