@@ -21,7 +21,7 @@ export async function runButcherChat(
 
   for (let round = 0; round < MAX_TOOL_ROUNDS && reply === null; round++) {
     const res = await chatCompletion({ messages, tools: TOOL_DEFINITIONS, maxTokens: 2000 });
-    trace.spend("Happy Butcher", res.cost);
+    trace.spend("Happy Butcher", res.cost, res.cachedTokens, res.cacheWriteTokens);
     if (res.content?.trim()) spoken.push(res.content.trim());
     if (res.toolCalls.length === 0) {
       reply = spoken.join("\n\n") || "Well, I'll be, I lost my train of thought. Ask me that again?";

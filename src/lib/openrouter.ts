@@ -23,6 +23,24 @@ export interface ToolDefinition {
   function: { name: string; description: string; parameters: object };
 }
 
+/**
+ * Marks one cache breakpoint for Claude's prompt caching, at the system prompt (which also covers
+ * the tool definitions sent ahead of it). That prefix is identical for every cut a run prices, so
+ * it is written once and read by every later call.
+ *
+ * Caching the rest of the conversation as well was tried and cost more than it saved: each round
+ * rewrote a bigger prefix (writes cost 1.25x, reads 0.1x), and an agent finishes in too few rounds
+ * to earn that back. Below Claude's minimum cacheable length (about 2k tokens on Haiku) the
+ * breakpoint is simply ignored.
+ */
+function withCacheBreakpoints(messages: ChatMessage[]): unknown[] {
+  return messages.map((m) =>
+    m.role === "system" && typeof m.content === "string" && m.content.length > 0
+      ? { ...m, content: [{ type: "text", text: m.content, cache_control: { type: "ephemeral" } }] }
+      : m,
+  );
+}
+
 export async function chatCompletion(input: {
   messages: ChatMessage[];
   tools?: ToolDefinition[];
@@ -31,7 +49,9 @@ export async function chatCompletion(input: {
   temperature?: number;
   model?: string;
   timeoutMs?: number;
-}): Promise<{ content: string | null; toolCalls: ToolCall[]; cost: number; model: string }> {
+  /** Off for one-shot calls, where a cache write would just cost extra. */
+  cache?: boolean;
+}): Promise<{ content: string | null; toolCalls: ToolCall[]; cost: number; model: string; cachedTokens: number; cacheWriteTokens: number }> {
   const res = await fetch(OPENROUTER_URL, {
     method: "POST",
     headers: {
@@ -43,7 +63,7 @@ export async function chatCompletion(input: {
       model: input.model || process.env.OPENROUTER_MODEL || DEFAULT_MODEL,
       temperature: input.temperature ?? 0.7,
       max_tokens: input.maxTokens,
-      messages: input.messages,
+      messages: input.cache === false ? input.messages : withCacheBreakpoints(input.messages),
       // Ask OpenRouter to report what the call cost, so a run can total up its own spend.
       usage: { include: true },
       ...(input.tools?.length ? { tools: input.tools, tool_choice: input.toolChoice ?? "auto" } : {}),
@@ -63,6 +83,8 @@ export async function chatCompletion(input: {
     toolCalls: message.tool_calls ?? [],
     cost: Number(data?.usage?.cost ?? 0) || 0,
     model: String(data?.model ?? input.model ?? ""),
+    cachedTokens: Number(data?.usage?.prompt_tokens_details?.cached_tokens ?? 0) || 0,
+    cacheWriteTokens: Number(data?.usage?.prompt_tokens_details?.cache_write_tokens ?? 0) || 0,
   };
 }
 

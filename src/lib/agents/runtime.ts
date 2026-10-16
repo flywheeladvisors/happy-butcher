@@ -19,13 +19,18 @@ export class Trace {
   readonly events: TraceEvent[] = [];
   /** What this piece of work cost in OpenRouter credits, per agent. */
   readonly cost = new Map<AgentName, number>();
+  /** Prompt tokens served from cache, and written to it, across this piece of work. */
+  cacheRead = 0;
+  cacheWritten = 0;
 
   add(agent: AgentName, kind: TraceEvent["kind"], summary: string) {
     this.events.push({ at: new Date().toISOString(), agent, kind, summary: summary.slice(0, 300) });
   }
 
-  spend(agent: AgentName, usd: number) {
+  spend(agent: AgentName, usd: number, cachedTokens = 0, cacheWriteTokens = 0) {
     if (usd > 0) this.cost.set(agent, (this.cost.get(agent) ?? 0) + usd);
+    this.cacheRead += cachedTokens;
+    this.cacheWritten += cacheWriteTokens;
   }
 
   get totalCost(): number {
@@ -86,7 +91,7 @@ export async function runAgent<Ctx, Out>(spec: AgentSpec<Ctx, Out>, input: strin
       // On the last round the agent must hand in what it has.
       toolChoice: lastRound ? { type: "function", function: { name: spec.submit.name } } : "auto",
     });
-    trace.spend(spec.name, reply.cost);
+    trace.spend(spec.name, reply.cost, reply.cachedTokens, reply.cacheWriteTokens);
 
     const calls = reply.toolCalls;
     if (calls.length === 0) {
