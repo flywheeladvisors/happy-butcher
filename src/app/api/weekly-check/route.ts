@@ -20,9 +20,15 @@ export async function POST(request: Request) {
       phase === "finish"
         ? await finishWeeklyRun(Number(params.get("run")), { sendEmail: !dry })
         : await runWeeklyCheck({ sendEmail: !dry });
+    // A run that priced nothing is a failure, not a quiet week: without this it looks successful
+    // and nobody hears about it (e.g. the Oct 14 run, when OpenRouter credits ran out).
+    const nothingPriced = report.checks === 0;
     const hasNews = report.best_offers.length > 0;
-    const failed = hasNews && !dry && !report.emailed;
-    return Response.json(report, { status: failed ? 502 : 200 });
+    const emailFailed = hasNews && !dry && !report.emailed;
+    if (nothingPriced) {
+      return Response.json({ ...report, error: "No prices were recorded for this run: every cut failed." }, { status: 502 });
+    }
+    return Response.json(report, { status: emailFailed ? 502 : 200 });
   } catch (err) {
     console.error("weekly check failed", err);
     return Response.json({ error: err instanceof Error ? err.message : "Weekly check failed" }, { status: 500 });

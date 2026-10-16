@@ -15,7 +15,9 @@ name: Wednesday meat deals
 
 on:
   schedule:
-    - cron: "0 12 * * 3"
+    # Not on the hour: GitHub queues scheduled jobs and the top of the hour is its busiest minute,
+    # which has delayed this run by hours before.
+    - cron: "7 12 * * 3"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -49,8 +51,18 @@ jobs:
               -H "Authorization: Bearer $CRON_SECRET" -H "Content-Type: application/json" \
               -d "{\"watchItemId\": {}, \"runId\": $RUN_ID}" --max-time 300) || code="curl-error"
             echo "cut {}: HTTP $code $(cat cut_{}.json 2>/dev/null)"
-            [ "$code" = "200" ] || echo "::warning::cut {} failed (HTTP $code)"
+            if [ "$code" = "200" ]; then : > "ok_{}"; else echo "::warning::cut {} failed (HTTP $code)"; fi
           '
+          total=$(jq -r '.cuts | length' start.json)
+          ok=$(ls ok_* 2>/dev/null | wc -l)
+          echo "$ok of $total cuts priced"
+          # Every cut failing means something is broken (API credits, a key, an outage), not a quiet week.
+          if [ "$ok" -eq 0 ]; then
+            echo "::error::All $total cuts failed. Check the response bodies above (e.g. OpenRouter credits, API keys)."
+            exit 1
+          fi
+          [ "$ok" -lt "$total" ] && echo "::warning::$((total - ok)) of $total cuts failed"
+          exit 0
 
       - name: 3. Finish (Butcher writes the rundown, email goes out)
         run: |
