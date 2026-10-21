@@ -68,6 +68,21 @@ function offerWas(o: Offer): string {
 
 const tag = (o: Offer) => (o.on_sale ? "SALE" : "Everyday");
 
+/** The headline figure: the per-lb price, or the package price when no weight is published. */
+function offerMain(o: Offer): string {
+  const pkg = money(o.price);
+  if (o.per_lb === null) return pkg ?? o.promo_text ?? "On sale";
+  return `${o.per_lb_source === "derived" ? "≈" : ""}$${o.per_lb.toFixed(2)}/lb`;
+}
+
+/** The small line under the price: what the package itself costs, or that there's no weight. */
+function offerUnitNote(o: Offer): string {
+  const pkg = money(o.price);
+  if (o.per_lb === null) return "per package";
+  if (!pkg || (o.per_lb === o.price && o.per_lb_source === "unit")) return "";
+  return `${pkg} per package`;
+}
+
 export function renderEmail(cuts: CutOffers[], words: { intro: string; signoff: string }, appUrl: string | null) {
   // Beef, then Chicken, then Pork (then anything else).
   const groups = groupCuts(cuts, (c) => c.item);
@@ -91,43 +106,109 @@ export function renderEmail(cuts: CutOffers[], words: { intro: string; signoff: 
 
   const badge = (o: Offer) =>
     o.on_sale
-      ? `<span style="display:inline-block;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:0 5px;font-size:10px;font-weight:600;margin-left:6px">SALE</span>`
-      : `<span style="display:inline-block;background:#f5f5f5;color:#737373;border-radius:4px;padding:0 5px;font-size:10px;margin-left:6px">EVERYDAY</span>`;
+      ? `<span class="tag" style="display:inline-block;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:0 5px;font-size:10px;font-weight:600;margin-left:6px">SALE</span>`
+      : `<span class="tag" style="display:inline-block;background:#f5f5f5;color:#737373;border-radius:4px;padding:0 5px;font-size:10px;margin-left:6px">EVERYDAY</span>`;
+  // Each cut is its own fixed-layout table, so the four columns keep sensible widths on screen and
+  // on paper, long product names wrap instead of squeezing the column, and a cut isn't split
+  // across a page break when printed.
   const row = (o: Offer, label: string, best: boolean) => `<tr>
-      <td style="padding:7px 8px 7px 0;font-size:12px;color:#a3a3a3;vertical-align:top;width:18px">${label}</td>
-      <td style="padding:7px 8px 7px 0;font-size:13px;vertical-align:top;white-space:nowrap;${best ? "font-weight:600" : "color:#404040"}">${esc(o.store)}${badge(o)}</td>
-      <td style="padding:7px 8px;font-size:12px;color:#525252;vertical-align:top">${o.product_url ? `<a href="${esc(o.product_url)}" style="color:#525252">${esc(o.product_name ?? "")}</a>` : esc(o.product_name ?? "")}${
-        o.on_sale && o.promo_text ? `<div style="color:#b91c1c;font-size:11px;margin-top:2px">${esc(o.promo_text)}</div>` : ""
+      <td class="rank">${label}</td>
+      <td class="store${best ? " best" : ""}">${esc(o.store)}${badge(o)}</td>
+      <td class="product">${o.product_url ? `<a href="${esc(o.product_url)}">${esc(o.product_name ?? "")}</a>` : esc(o.product_name ?? "")}${
+        o.on_sale && o.promo_text ? `<div class="promo">${esc(o.promo_text)}</div>` : ""
       }</td>
-      <td style="padding:7px 0 7px 8px;font-size:13px;text-align:right;white-space:nowrap;vertical-align:top;${best ? "font-weight:700" : ""}">${esc(offerPrice(o))}${
-        offerWas(o) ? `<div style="color:#b91c1c;font-size:11px;font-weight:400">${esc(offerWas(o).replace(/^ — /, ""))}</div>` : ""
-      }</td></tr>`;
+      <td class="price${best ? " best" : ""}">${esc(offerMain(o))}${
+        offerWas(o) ? `<div class="was">${esc(offerWas(o).replace(/^ — /, ""))}</div>` : ""
+      }${offerUnitNote(o) ? `<div class="unit">${esc(offerUnitNote(o))}</div>` : ""}</td></tr>`;
 
   const sections = groups
     .map(
-      ({ group, items }) => `<tr><td colspan="4" style="padding:22px 0 2px">
-        <span style="display:inline-block;background:#171717;color:#fff;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600;letter-spacing:0.04em">${esc(group.toUpperCase())}</span></td></tr>
+      ({ group, items }) => `<div class="group"><span class="group-label">${esc(group.toUpperCase())}</span></div>
       ${items
         .map(
-          (c) => `<tr><td colspan="4" style="padding:14px 0 4px;border-bottom:1px solid #e5e5e5">
-        <span style="font-weight:600;font-size:14px">${esc(c.item)}</span>${c.compared > 1 ? `<span style="color:#a3a3a3;font-size:11px;margin-left:6px">best of ${c.compared} stores</span>` : ""}</td></tr>
-      ${c.ranked.map((o, i) => row(o, String(i + 1), i === 0 || o.per_lb === c.ranked[0].per_lb)).join("")}
-      ${c.package_sales.map((o) => row(o, "+", false)).join("")}`,
+          (c) => `<div class="cut">
+        <div class="cut-head"><span class="cut-name">${esc(c.item)}</span>${c.compared > 1 ? `<span class="cut-note">best of ${c.compared} stores</span>` : ""}</div>
+        <table class="offers" role="presentation" cellpadding="0" cellspacing="0">
+          <colgroup><col class="c-rank" style="width:6%"><col class="c-store" style="width:26%"><col class="c-product" style="width:42%"><col class="c-price" style="width:26%"></colgroup>
+          <tbody>
+            ${c.ranked.map((o, i) => row(o, String(i + 1), i === 0 || o.per_lb === c.ranked[0].per_lb)).join("")}
+            ${c.package_sales.map((o) => row(o, "+", false)).join("")}
+          </tbody>
+        </table>
+      </div>`,
         )
         .join("")}`,
     )
     .join("");
 
-  const html = `<div style="background:#efefef;padding:24px 12px;font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#171717">
-  <div style="max-width:620px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:14px;padding:24px">
-    <div style="font-size:13px;font-weight:600"><span style="display:inline-block;background:#171717;color:#fff;border-radius:5px;padding:2px 5px;font-size:10px;margin-right:6px">HB</span>The Happy Butcher</div>
-    <h1 style="font-size:20px;margin:18px 0 8px">This week's best prices on your cuts</h1>
-    <p style="font-size:14px;line-height:1.5;color:#404040;margin:0 0 8px">${esc(words.intro)}</p>
-    <table style="width:100%;border-collapse:collapse">${sections}</table>
-    <p style="font-size:14px;color:#404040;margin:20px 0 0">${esc(words.signoff)}</p>
-    ${appUrl ? `<p style="margin:18px 0 0"><a href="${esc(appUrl)}" style="display:inline-block;background:#171717;color:#fff;text-decoration:none;border-radius:8px;padding:8px 14px;font-size:13px">Ask the butcher</a></p>` : ""}
-    <p style="font-size:11px;color:#a3a3a3;margin:20px 0 0">Ranked by the price per pound you'd pay this week, sale or everyday, at your Cary stores. "≈" means the per-lb price was worked out from the package weight. "+" rows are sales whose listing gives no weight, so they can't be compared per lb. "Approx." regular prices come from "save up to" wording in an ad.</p>
-  </div></div>`;
+  const html = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>This week's best prices on your cuts</title>
+<style>
+  body { margin: 0; background: #efefef; font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #171717; }
+  .wrap { padding: 24px 12px; }
+  .card { max-width: 640px; margin: 0 auto; background: #fff; border: 1px solid #e5e5e5; border-radius: 14px; padding: 24px; box-sizing: border-box; }
+  .brand { font-size: 13px; font-weight: 600; }
+  .brand span { display: inline-block; background: #171717; color: #fff; border-radius: 5px; padding: 2px 5px; font-size: 10px; margin-right: 6px; }
+  h1 { font-size: 20px; margin: 18px 0 8px; }
+  .intro { font-size: 14px; line-height: 1.5; color: #404040; margin: 0 0 8px; }
+  .group { margin: 22px 0 2px; }
+  .group-label { display: inline-block; background: #171717; color: #fff; border-radius: 5px; padding: 2px 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; }
+  .cut { margin-top: 14px; }
+  .cut-head { padding-bottom: 4px; border-bottom: 1px solid #e5e5e5; }
+  .cut-name { font-weight: 600; font-size: 14px; }
+  .cut-note { color: #a3a3a3; font-size: 11px; margin-left: 6px; }
+  /* Fixed layout: the columns keep their share of the width instead of the product name being
+     squeezed by store and price cells that refuse to wrap. */
+  table.offers { width: 100%; table-layout: fixed; border-collapse: collapse; }
+  table.offers td { padding: 7px 8px; vertical-align: top; word-wrap: break-word; overflow-wrap: break-word; }
+  td.rank { padding-left: 0; font-size: 12px; color: #a3a3a3; }
+  td.store { font-size: 13px; color: #404040; }
+  td.product { font-size: 12px; color: #525252; }
+  td.product a { color: #525252; }
+  td.price { padding-right: 0; font-size: 13px; text-align: right; }
+  td.store.best { color: #171717; font-weight: 600; }
+  td.price.best { font-weight: 700; }
+  .promo { color: #b91c1c; font-size: 11px; margin-top: 2px; }
+  .was { color: #b91c1c; font-size: 11px; font-weight: 400; }
+  .unit { color: #a3a3a3; font-size: 11px; font-weight: 400; }
+  .signoff { font-size: 14px; color: #404040; margin: 20px 0 0; }
+  .cta { margin: 18px 0 0; }
+  .cta a { display: inline-block; background: #171717; color: #fff; text-decoration: none; border-radius: 8px; padding: 8px 14px; font-size: 13px; }
+  .footnote { font-size: 11px; color: #a3a3a3; margin: 20px 0 0; }
+  @media only screen and (max-width: 520px) {
+    .wrap { padding: 12px 8px; }
+    .card { padding: 16px; }
+    /* Narrower screen: give the store and price columns more room, and let the tag sit under the
+       store name. The rank column stays (hiding a cell would shift a fixed layout's columns). */
+    .c-rank { width: 5%; }
+    .c-store { width: 30%; }
+    .c-product { width: 36%; }
+    .c-price { width: 29%; }
+    table.offers td { padding: 7px 4px; }
+    td.store .tag { display: block; margin-left: 0; margin-top: 2px; }
+    td.product { font-size: 11px; }
+  }
+  @media print {
+    @page { margin: 12mm; }
+    body { background: #fff; }
+    .wrap { padding: 0; }
+    .card { max-width: none; width: auto; border: none; border-radius: 0; padding: 0; }
+    .cut { page-break-inside: avoid; break-inside: avoid; }
+    .group { page-break-after: avoid; break-after: avoid; }
+    .cta { display: none; }
+    a { color: #171717; text-decoration: none; }
+  }
+</style></head>
+<body><div class="wrap"><div class="card">
+    <div class="brand"><span>HB</span>The Happy Butcher</div>
+    <h1>This week's best prices on your cuts</h1>
+    <p class="intro">${esc(words.intro)}</p>
+    ${sections}
+    <p class="signoff">${esc(words.signoff)}</p>
+    ${appUrl ? `<p class="cta"><a href="${esc(appUrl)}">Ask the butcher</a></p>` : ""}
+    <p class="footnote">Ranked by the price per pound you'd pay this week, sale or everyday, at your Cary stores. "≈" means the per-lb price was worked out from the package weight. "+" rows are sales whose listing gives no weight, so they can't be compared per lb. "Approx." regular prices come from "save up to" wording in an ad.</p>
+</div></div></body></html>`;
 
   return { text, html };
 }
